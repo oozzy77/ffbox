@@ -1,0 +1,1 @@
+aws cloudformation create-stack --stack-name my-gpu-stack --template-body file://cf.yaml 
