@@ -1,17 +1,42 @@
-Parameters:
-  MySubnet:
-    Type: String
-    Description: "The Subnet ID for the EC2 instance"
-  MySecurityGroup:
-    Type: String
-    Description: "The Security Group ID for the EC2 instance"
 Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+
+  MySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  MySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH, HTTP, and HTTPS
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
   GPUInstance:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: g4dn.xlarge # GPU instance with 40GB VRAM
       ImageId: ami-06b21ccaeff8cd686 # Replace with a preferred Linux AMI ID
-      # KeyName: my-key-pair # Replace with your actual key pair name in AWS
+      KeyName: my-gpu-key # Replace with your actual key pair name in AWS
       SubnetId: !Ref MySubnet
       SecurityGroupIds:
         - !Ref MySecurityGroup

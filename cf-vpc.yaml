@@ -30,44 +30,10 @@ Resources:
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
-
-  GPUInstance:
-    Type: AWS::EC2::Instance
-    Properties:
-      InstanceType: g4dn.xlarge # GPU instance with 40GB VRAM
-      ImageId: ami-06b21ccaeff8cd686 # Replace with a preferred Linux AMI ID
-      # KeyName: my-key-pair # Replace with your actual key pair name in AWS
-      SubnetId: !Ref MySubnet
-      SecurityGroupIds:
-        - !Ref MySecurityGroup
-      UserData:
-        Fn::Base64: |
-          #!/bin/bash
-          # Update and install FUSE
-          sudo apt update
-          sudo apt install -y fuse
-
-          # Install rclone
-          curl https://rclone.org/install.sh | sudo bash
-
-          # Download and install Miniconda
-          wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-          bash Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda
-          rm Miniconda3-latest-Linux-x86_64.sh
-
-          # Add Conda to PATH
-          echo 'export PATH="$HOME/miniconda/bin:$PATH"' >> ~/.bashrc
-          source ~/.bashrc
-
-          # Verify installations
-          conda --version
-          rclone version
-          fuse --version
-
 Outputs:
-  InstanceId:
-    Description: "The Instance ID of the EC2 instance"
-    Value: !Ref GPUInstance
-  PublicIp:
-    Description: "The public IP address of the EC2 instance"
-    Value: !GetAtt GPUInstance.PublicIp
+  SubnetId:
+    Description: "The Subnet ID of the EC2 instance"
+    Value: !Ref MySubnet
+  MySecurityGroupId:
+    Description: "The Security Group ID of the EC2 instance"
+    Value: !Ref MySecurityGroup
