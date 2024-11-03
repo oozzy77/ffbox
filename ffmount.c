@@ -2,91 +2,112 @@
 #include <linux/fs.h>
 #include <linux/pagemap.h>
 #include <linux/namei.h>
+#include <linux/buffer_head.h>
+#include <linux/dcache.h>
 
 #define MYFS_MAGIC 0x12345678
 
-// Original file operations
-static const struct file_operations *original_fops;
+// Forward declaration
+static int myfs_iterate(struct file *file, struct dir_context *ctx);
 
-// Custom read operation
-static ssize_t myfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos) {
-    pr_info("myfs: entering read operation\n");
-    if (!original_fops || !original_fops->read) {
-        pr_err("myfs: original read operation is NULL\n");
-        return -EIO;
-    }
-    pr_info("myfs: reading file at position %lld with count %zu\n", *pos, count);
-    ssize_t result = original_fops->read(file, buf, count, pos);
-    pr_info("myfs: read operation completed with result %zd\n", result);
-    return result;
+// Use standard Linux file operations
+static const struct file_operations myfs_file_operations = {
+    .read_iter = generic_file_read_iter,
+    .write_iter = generic_file_write_iter,
+    .mmap = generic_file_mmap,
+    .fsync = generic_file_fsync,
+    .llseek = generic_file_llseek,
+    .open = generic_file_open,
+};
+
+// Use standard Linux inode operations
+static const struct inode_operations myfs_inode_operations = {
+    .lookup = simple_lookup,
+    .link = simple_link,
+    .unlink = simple_unlink,
+    .rename = simple_rename,
+};
+
+// Directory operations
+static const struct file_operations myfs_dir_operations = {
+    .read = generic_read_dir,
+    .iterate = myfs_iterate,
+};
+
+// Superblock operations
+static const struct super_operations myfs_super_ops = {
+    .statfs = simple_statfs,
+    .drop_inode = generic_drop_inode,
+};
+
+// Simple directory iterator
+static int myfs_iterate(struct file *file, struct dir_context *ctx) {
+    if (ctx->pos)
+        return 0;
+
+    if (!dir_emit_dots(file, ctx))
+        return -ENOMEM;
+
+    ctx->pos = 2;
+    return 0;
 }
 
-// Custom file operations
-static struct file_operations myfs_file_operations;
-
-// Fill superblock with custom operations
-static int myfs_fill_super(struct super_block *sb, void *data, int silent) {
-    pr_info("myfs: filling superblock\n");
+// Initialize inode
+static struct inode *myfs_make_inode(struct super_block *sb, umode_t mode) {
     struct inode *inode = new_inode(sb);
     if (!inode) {
-        pr_err("myfs: failed to allocate new inode\n");
+        return NULL;
+    }
+
+    inode->i_mode = mode;
+    inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+    inode->i_blocks = 0;
+    
+    if (S_ISDIR(mode)) {
+        inode->i_op = &simple_dir_inode_operations;
+        inode->i_fop = &myfs_dir_operations;
+        inc_nlink(inode);
+    } else if (S_ISREG(mode)) {
+        inode->i_op = &myfs_inode_operations;
+        inode->i_fop = &myfs_file_operations;
+        inode->i_mapping->a_ops = &empty_aops;
+    }
+
+    return inode;
+}
+
+static int myfs_fill_super(struct super_block *sb, void *data, int silent) {
+    struct inode *root;
+
+    // Set up superblock
+    sb->s_magic = MYFS_MAGIC;
+    sb->s_op = &myfs_super_ops;
+    sb->s_time_gran = 1;
+
+    // Create root inode
+    root = myfs_make_inode(sb, S_IFDIR | 0755);
+    if (!root) {
+        pr_err("myfs: failed to create root inode\n");
         return -ENOMEM;
     }
 
-    // Initialize myfs_file_operations at runtime
-    myfs_file_operations.read = myfs_read;
-    myfs_file_operations.write = original_fops->write;
-    myfs_file_operations.open = original_fops->open;
-    myfs_file_operations.release = original_fops->release;
-    myfs_file_operations.llseek = original_fops->llseek;
-    myfs_file_operations.iterate = original_fops->iterate;
-    myfs_file_operations.fsync = original_fops->fsync;
-    myfs_file_operations.mmap = original_fops->mmap;
-    myfs_file_operations.unlocked_ioctl = original_fops->unlocked_ioctl;
-    myfs_file_operations.compat_ioctl = original_fops->compat_ioctl;
-    myfs_file_operations.splice_read = original_fops->splice_read;
-    myfs_file_operations.splice_write = original_fops->splice_write;
-    myfs_file_operations.fasync = original_fops->fasync;
-    myfs_file_operations.lock = original_fops->lock;
-    myfs_file_operations.flock = original_fops->flock;
-    myfs_file_operations.check_flags = original_fops->check_flags;
-    myfs_file_operations.setlease = original_fops->setlease;
-    myfs_file_operations.fallocate = original_fops->fallocate;
-    myfs_file_operations.show_fdinfo = original_fops->show_fdinfo;
-
-    inode->i_ino = 1;
-    inode->i_sb = sb;
-    inode->i_op = &simple_dir_inode_operations;
-    inode->i_fop = &myfs_file_operations; // Use custom file operations
-
-    // Use default dentry operations
-    sb->s_d_op = NULL; // NULL indicates using default dentry operations
-
-    sb->s_root = d_make_root(inode);
+    // Create root dentry
+    sb->s_root = d_make_root(root);
     if (!sb->s_root) {
+        iput(root);
         pr_err("myfs: failed to create root dentry\n");
         return -ENOMEM;
     }
 
-    pr_info("myfs: superblock filled successfully\n");
     return 0;
 }
 
-// Mount function
 static struct dentry *myfs_mount(struct file_system_type *fs_type,
-                                 int flags, const char *dev_name,
-                                 void *data) {
-    pr_info("myfs: mounting filesystem\n");
-    struct dentry *dentry = mount_nodev(fs_type, flags, data, myfs_fill_super);
-    if (IS_ERR(dentry)) {
-        pr_err("myfs: failed to mount filesystem\n");
-    } else {
-        pr_info("myfs: filesystem mounted successfully\n");
-    }
-    return dentry;
+                               int flags, const char *dev_name,
+                               void *data) {
+    return mount_nodev(fs_type, flags, data, myfs_fill_super);
 }
 
-// Filesystem type
 static struct file_system_type myfs_type = {
     .owner = THIS_MODULE,
     .name = "myfs",
@@ -94,62 +115,21 @@ static struct file_system_type myfs_type = {
     .kill_sb = kill_litter_super,
 };
 
-// Function to get file operations from an existing inode
-static const struct file_operations *get_current_fops(void) {
-    struct inode *inode;
-    struct path path;
-    int err;
-
-    // Example path to an existing file on the disk
-    err = kern_path("/home/ec2-user/ffmm/ffmount.c", LOOKUP_FOLLOW, &path);
-    if (err) {
-        pr_err("myfs: failed to get path to existing file\n");
-        return NULL;
-    }
-
-    inode = path.dentry->d_inode;
-    if (!inode) {
-        pr_err("myfs: inode is NULL\n");
-        return NULL;
-    }
-
-    return inode->i_fop;
-}
-
-// Module initialization
 static int __init myfs_init(void) {
-    pr_info("myfs: initializing\n");
-
-    // Initialize original_fops with file operations from an existing inode
-    original_fops = get_current_fops();
-    if (!original_fops) {
-        pr_err("myfs: failed to get original file operations\n");
-        return -EINVAL;
-    }
-
     int ret = register_filesystem(&myfs_type);
-    if (ret == 0) {
-        pr_info("myfs: filesystem registered\n");
-    } else {
+    if (ret) {
         pr_err("myfs: failed to register filesystem\n");
     }
     return ret;
 }
 
-// Module exit
 static void __exit myfs_exit(void) {
-    pr_info("myfs: exiting\n");
-    int ret = unregister_filesystem(&myfs_type);
-    if (ret == 0) {
-        pr_info("myfs: filesystem unregistered\n");
-    } else {
-        pr_err("myfs: failed to unregister filesystem\n");
-    }
+    unregister_filesystem(&myfs_type);
 }
 
 module_init(myfs_init);
 module_exit(myfs_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Simple Virtual Filesystem with Logging");
+MODULE_DESCRIPTION("POSIX-compliant Virtual Filesystem");
 MODULE_AUTHOR("Your Name");
