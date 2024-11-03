@@ -26,6 +26,9 @@ static const struct inode_operations myfs_inode_operations = {
     .link = simple_link,
     .unlink = simple_unlink,
     .rename = simple_rename,
+    .setattr = simple_setattr,
+    .getattr = simple_getattr,
+    .permission = generic_permission,
 };
 
 // Directory operations
