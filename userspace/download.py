@@ -5,7 +5,7 @@ from __future__ import with_statement
 import os
 import sys
 import errno
-
+import boto3  
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
 
@@ -107,6 +107,23 @@ class Passthrough(Operations):
 
     def open(self, path, flags):
         full_path = self._full_path(path)
+        # if not os.path.exists(full_path):
+        #     # download from s3
+        #     try:
+        #         s3 = boto3.client('s3')
+        #         bucket_name = 'your-bucket-name'
+        #         # Remove leading slash and convert to S3 key
+        #         s3_key = path[1:] if path.startswith('/') else path
+                
+        #         # Ensure the directory exists
+        #         os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                
+        #         # Download the file from S3
+        #         s3.download_file(bucket_name, s3_key, full_path)
+        #         return os.open(full_path, flags)
+        #     except Exception as e:
+        #         raise FuseOSError(errno.ENOENT)
+                
         return os.open(full_path, flags)
 
     def create(self, path, mode, fi=None):
