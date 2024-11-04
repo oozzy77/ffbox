@@ -3,13 +3,16 @@
 from __future__ import with_statement
 
 import os
+import shutil
+import subprocess
 import sys
 import errno
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
 
 class Passthrough(Operations):
-    def __init__(self, root):
+    def __init__(self, s3_url, root):
+        self.s3_url = s3_url
         self.root = root
 
     # Helpers
@@ -106,6 +109,12 @@ class Passthrough(Operations):
 
     def open(self, path, flags):
         full_path = self._full_path(path)
+        # if not os.path.exists(full_path):
+        #     # download from s3
+        #     print(f"Downloading {full_path} from s3")
+        #     relpath = os.path.relpath(full_path, self.root)
+        #     # run s5cmd cp s3://bucket/object.gz .
+        #     subprocess.run(["s5cmd", "cp", f"{self.s3_url}/{relpath}", "."])
         return os.open(full_path, flags)
 
     def create(self, path, mode, fi=None):
@@ -138,12 +147,26 @@ class Passthrough(Operations):
         return self.flush(path, fh)
 
 
-def main(mountpoint, root):
+def main(s3_url, mountpoint, prefix='/home/ec2-user/ffmount_noot'):
     # FUSE(Passthrough(root), mountpoint, nothreads=True, foreground=True)
-    FUSE(Passthrough(root), mountpoint, nothreads=True,)
+    fake_path = os.path.abspath(mountpoint)
+    s3_bucket_name = '/'.join(s3_url.split('//')[1:])
+    print(f's3 bucket name: {s3_bucket_name}')
+    real_storage_path = os.path.join(prefix, s3_bucket_name)
+    if os.path.exists(fake_path):
+        print(f"Warning: {fake_path} already exists, do you want to override?")
+        if input("y/n: ") != "y":
+            print("Exiting")
+            return
+        else:
+            print("Overriding")
+            shutil.rmtree(fake_path)
+    os.makedirs(fake_path, exist_ok=True)
+    print(f"real storage path: {real_storage_path}, fake storage path: {fake_path}")
+    FUSE(Passthrough(s3_url, real_storage_path), fake_path, nothreads=True,)
 
 
 if __name__ == '__main__':
-    main(sys.argv[2], sys.argv[1])
+    main(sys.argv[1], sys.argv[2])
 
 # python3 mount.py /home/ec2-user/fake_folder /home/ec2-user/real_folder
