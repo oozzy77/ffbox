@@ -4,6 +4,10 @@ import boto3
 
 META_DIR = '.ffmount_meta'
 # s3 = boto3.client('s3')
+def get_attr_for_file(full_path)->dict:
+    save_path = get_getattr_file_save_path(full_path)
+    with open(save_path, 'r') as save_file:
+        return json.load(save_file)
 
 def get_getattr_dir_save_path(dir_path):
     return os.path.join(dir_path, META_DIR, 'getattr.json')

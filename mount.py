@@ -2,6 +2,7 @@
 
 from __future__ import with_statement
 
+import json
 import os
 import shutil
 import subprocess
@@ -10,7 +11,7 @@ import errno
 # import boto3
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
-from ffmount.fileops import META_DIR, get_getattr_dir_save_path, getattr_from_cloud, restore_file_attributes
+from ffmount.fileops import META_DIR, get_getattr_dir_save_path, get_getattr_file_save_path, getattr_from_cloud, restore_file_attributes
 
 class Passthrough(Operations):
     def __init__(self, root, s3_url):
@@ -31,13 +32,28 @@ class Passthrough(Operations):
     # Cloud s3 file operations
     # ==================
 
-    def cloud_dir_getattr(self, full_path):
-        relpath = os.path.relpath(full_path, self.root)
-        cloud_url = f'{self.s3_url}/{relpath}/{META_DIR}/getattr.json'
-        print(f'⏩downloading {cloud_url} to {full_path}')
+    def cloud_getattr(self, full_path):
         getattr_path = get_getattr_dir_save_path(full_path)
-        subprocess.run(['s5cmd', 'cp', cloud_url, getattr_path])
-        attr_data = restore_file_attributes(full_path, getattr_path)
+        file_attr_path = get_getattr_file_save_path(full_path)
+        if not os.path.exists(getattr_path):
+            relpath = os.path.relpath(full_path, self.root)
+            cloud_url = f'{self.s3_url}/{relpath}/{META_DIR}/getattr.json'
+            print(f'⏩downloading {cloud_url} to {full_path}')
+            try:
+                subprocess.run(['s5cmd', 'cp', cloud_url, getattr_path])
+            except Exception as e:
+                print(f'error downloading {cloud_url} to {full_path}: {e}')
+        if not os.path.exists(file_attr_path):
+            relpath = os.path.relpath(os.path.dirname(full_path), self.root)
+            cloud_url = f'{self.s3_url}/{relpath}/{META_DIR}/{os.path.basename(full_path)}'
+            print(f'⏩downloading {cloud_url} to {full_path}')
+            try:
+                subprocess.run(['s5cmd', 'cp', cloud_url, file_attr_path])
+            except Exception as e:
+                print(f'error downloading {cloud_url} to {full_path}: {e}')
+        attr_data = {}
+        with open(getattr_path, 'r') as getattr_file:
+            attr_data = json.load(getattr_file)
         return attr_data
 
     # Filesystem methods
@@ -60,7 +76,7 @@ class Passthrough(Operations):
         print(f'👇getting attributes of {path}')
         full_path = self._full_path(path)
         if not os.path.exists(full_path):
-            attr_data = self.cloud_dir_getattr(full_path).get('attr')
+            attr_data = self.cloud_getattr(full_path).get('attr')
         else:
             st = os.lstat(full_path)
             attr_data = dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
