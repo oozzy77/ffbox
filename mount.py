@@ -3,6 +3,7 @@
 from __future__ import with_statement
 
 import os
+import shutil
 import sys
 import errno
 
@@ -10,8 +11,11 @@ from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
 
 class Passthrough(Operations):
-    def __init__(self, root):
+    def __init__(self, root, s3_url):
         self.root = root
+        self.s3_url = s3_url
+        print(f'init s3_url: {s3_url}')
+        print(f'init root: {root}')
 
     # Helpers
     # =======
@@ -130,12 +134,33 @@ class Passthrough(Operations):
         return self.flush(path, fh)
 
 
-def main(mountpoint, root):
-    FUSE(Passthrough(root), mountpoint, nothreads=True, foreground=True)
+# def main(mountpoint, root):
+#     FUSE(Passthrough(root), mountpoint, nothreads=True, foreground=True)
 
 
-if __name__ == '__main__':
-    main(sys.argv[2], sys.argv[1])
+# if __name__ == '__main__':
+#     main(sys.argv[2], sys.argv[1])
 
 # mkdir -p /fake_path1 && mkdir -p /real_path1
 #  python ffmount/mount.py /real_path1 /fake_path1
+
+def main(s3_url, mountpoint, prefix='/home/ec2-user/realer22'):
+    fake_path = os.path.abspath(mountpoint)
+    s3_bucket_name = '/'.join(s3_url.split('://')[1:])
+    print(f's3 bucket name: {s3_bucket_name}')
+    real_storage_path = os.path.join(prefix, s3_bucket_name)
+    if os.path.exists(fake_path):
+        print(f"Warning: {fake_path} already exists, do you want to override?")
+        if input("y/n: ") != "y":
+            print("Exiting")
+            return
+        else:
+            shutil.rmtree(fake_path)
+    os.makedirs(fake_path, exist_ok=True)
+    os.makedirs(real_storage_path, exist_ok=True)
+    print(f"real storage path: {real_storage_path}, fake storage path: {fake_path}")
+    FUSE(Passthrough(real_storage_path, s3_url), fake_path, nothreads=True, foreground=True)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1], sys.argv[2])
