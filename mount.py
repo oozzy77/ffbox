@@ -137,14 +137,13 @@ class Passthrough(Operations):
 # def main(mountpoint, root):
 #     FUSE(Passthrough(root), mountpoint, nothreads=True, foreground=True)
 
-
 # if __name__ == '__main__':
 #     main(sys.argv[2], sys.argv[1])
 
 # mkdir -p /fake_path1 && mkdir -p /real_path1
-#  python ffmount/mount.py /real_path1 /fake_path1
+# python ffmount/mount.py /real_path1 /fake_path1
 
-def main(s3_url, mountpoint, prefix='/home/ec2-user/realer22'):
+def main(s3_url, mountpoint, prefix='/home/ec2-user/realer22', foreground=True):
     fake_path = os.path.abspath(mountpoint)
     s3_bucket_name = '/'.join(s3_url.split('://')[1:])
     print(f's3 bucket name: {s3_bucket_name}')
@@ -159,7 +158,7 @@ def main(s3_url, mountpoint, prefix='/home/ec2-user/realer22'):
     os.makedirs(fake_path, exist_ok=True)
     os.makedirs(real_storage_path, exist_ok=True)
     print(f"real storage path: {real_storage_path}, fake storage path: {fake_path}")
-    FUSE(Passthrough(real_storage_path, s3_url), fake_path, nothreads=True, foreground=True)
+    FUSE(Passthrough(real_storage_path, s3_url), fake_path, nothreads=True, foreground=foreground)
 
 
 if __name__ == '__main__':
