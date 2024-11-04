@@ -4,11 +4,13 @@ from __future__ import with_statement
 
 import os
 import shutil
+import subprocess
 import sys
 import errno
-
+# import boto3
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
+from ffmount.fileops import META_DIR, get_getattr_dir_save_path, getattr_from_cloud, restore_file_attributes
 
 class Passthrough(Operations):
     def __init__(self, root, s3_url):
@@ -25,6 +27,18 @@ class Passthrough(Operations):
             partial = partial[1:]
         path = os.path.join(self.root, partial)
         return path
+
+    # Cloud s3 file operations
+    # ==================
+
+    def cloud_dir_getattr(self, full_path):
+        relpath = os.path.relpath(full_path, self.root)
+        cloud_url = f'{self.s3_url}/{relpath}/{META_DIR}/getattr.json'
+        print(f'⏩downloading {cloud_url} to {full_path}')
+        getattr_path = get_getattr_dir_save_path(full_path)
+        subprocess.run(['s5cmd', 'cp', cloud_url, getattr_path])
+        attr_data = restore_file_attributes(full_path, getattr_path)
+        return attr_data
 
     # Filesystem methods
     # ==================
@@ -43,11 +57,15 @@ class Passthrough(Operations):
         return os.chown(full_path, uid, gid)
 
     def getattr(self, path, fh=None):
+        print(f'👇getting attributes of {path}')
         full_path = self._full_path(path)
-        st = os.lstat(full_path)
-        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
+        if not os.path.exists(full_path):
+            attr_data = self.cloud_dir_getattr(full_path).get('attr')
+        else:
+            st = os.lstat(full_path)
+            attr_data = dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
                      'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
-
+        return attr_data
     def readdir(self, path, fh):
         full_path = self._full_path(path)
 
@@ -73,6 +91,7 @@ class Passthrough(Operations):
         return os.rmdir(full_path)
 
     def mkdir(self, path, mode):
+        print(f'👇making directory {path}')
         return os.mkdir(self._full_path(path), mode)
 
     def statfs(self, path):
@@ -102,6 +121,14 @@ class Passthrough(Operations):
 
     def open(self, path, flags):
         full_path = self._full_path(path)
+        print(f'👇opening file {full_path}')
+        if not os.path.exists(full_path):
+            # download from s3
+            rel_path = os.path.relpath(full_path, self.root)
+            cloud_url = f'{self.s3_url}/{rel_path}'
+            print(f'downloading {cloud_url} to {full_path}')
+            # s5cmd cp s3://bucket/object.gz .
+            subprocess.run(['s5cmd', 'cp', cloud_url, full_path])
         return os.open(full_path, flags)
 
     def create(self, path, mode, fi=None):
