@@ -52,8 +52,12 @@ class Passthrough(Operations):
             except Exception as e:
                 print(f'error downloading {cloud_url} to {full_path}: {e}')
         attr_data = {}
-        with open(getattr_path, 'r') as getattr_file:
-            attr_data = json.load(getattr_file)
+        if os.path.exists(getattr_path):
+            with open(getattr_path, 'r') as getattr_file:
+                attr_data = json.load(getattr_file)
+        elif os.path.exists(file_attr_path):
+            with open(file_attr_path, 'r') as file_attr_file:
+                attr_data = json.load(file_attr_file)
         return attr_data
 
     # Filesystem methods
