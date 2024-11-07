@@ -4,13 +4,15 @@
 import subprocess
 
 def push_to_cloud():
-    # rclone sync image_gen test-conda:ff-image-gen --create-empty-src-dirs --progress
+    # rclone sync image_gen test-conda:ff-image-gen --create-empty-src-dirs --progress --copy-links
     subprocess.run(["rclone", "sync", "image_gen", "test-conda:ff-image-gen", "--create-empty-src-dirs", "--progress", "--partial"])
 
 def pull_from_cloud_and_run():
-    # mkdir my_image_gen_clone1 && rclone mount test-conda:ff-image-gen my_image_gen_clone1 --vfs-cache-mode full --progress
-    # cd my_image_gen_clone1 && conda activate ./conda_env && python main.py
-    subprocess.run(["rclone", "mount", "test-conda:ff-image-gen", "/my_image_gen1", "--vfs-cache-mode", "full", "--progress"])
+    # to readonly mount: rclone mount s3:some-bucket /local/project --read-only --vfs-cache-mode full
+    # to 2-way sync write: rclone mount s3:some-bucket /local/project --vfs-cache-mode full
+    # mkdir my_image_gen_clone3 && rclone mount test-conda:ff-image-gen my_image_gen_clone3 --vfs-cache-mode full
+    # cd my_image_gen_clone3 && conda activate ./conda_env && python main.py
+    subprocess.run(["rclone", "mount", "test-conda:ff-image-gen", "/my_image_gen2", "--read-only", "--vfs-cache-mode", "full"])
     subprocess.run(["cd", "image_gen", "&&", "conda", "activate", "./conda_env", "&&", "python", "main.py"])
 
 def main():
