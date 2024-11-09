@@ -1,14 +1,35 @@
 #!/bin/bash
 
-# Check if a virtual environment is activated
-if [ -z "$VIRTUAL_ENV" ]; then
-    echo "Error: No virtual environment is activated."
+# Check if the correct number of arguments is provided
+if [ "$#" -gt 2 ]; then
+    echo "Usage: $0 [<original_venv_path> <dest_venv_path>]"
     exit 1
 fi
 
-# Set paths
-ORIGINAL_VENV="$VIRTUAL_ENV"
-PORTABLE_VENV="$(dirname "$ORIGINAL_VENV")/portable_venv"
+# Determine the original and destination virtual environment paths
+if [ "$#" -eq 0 ]; then
+    if [ -z "$VIRTUAL_ENV" ]; then
+        echo "Error: No virtual environment is activated and no paths are provided."
+        exit 1
+    fi
+    ORIGINAL_VENV="$VIRTUAL_ENV"
+    PORTABLE_VENV="${ORIGINAL_VENV}_portable"
+elif [ "$#" -eq 1 ]; then
+    ORIGINAL_VENV="$1"
+    PORTABLE_VENV="${ORIGINAL_VENV}_portable"
+elif [ "$#" -eq 2 ]; then
+    ORIGINAL_VENV="$1"
+    PORTABLE_VENV="$2"
+else
+    echo "Error: Invalid number of arguments."
+    exit 1
+fi
+
+# Check if the original virtual environment path exists
+if [ ! -d "$ORIGINAL_VENV" ]; then
+    echo "Error: The specified original virtual environment path does not exist."
+    exit 1
+fi
 
 echo "Original VENV_PATH: $ORIGINAL_VENV"
 echo "Creating a copy of the virtual environment at: $PORTABLE_VENV"
@@ -17,7 +38,8 @@ echo "Creating a copy of the virtual environment at: $PORTABLE_VENV"
 cp -r "$ORIGINAL_VENV" "$PORTABLE_VENV"
 
 # Step 2: Replace symbolic links with actual binaries in bin/
-for PY_BIN in "$PORTABLE_VENV/bin/python" "$PORTABLE_VENV/bin/python3" "$PORTABLE_VENV/bin/python3.12"; do
+for PY_BIN in "$PORTABLE_VENV/bin/python"*; do
+
     # Check if it's a symbolic link
     if [ -L "$PY_BIN" ]; then
         # Get the real path of the target

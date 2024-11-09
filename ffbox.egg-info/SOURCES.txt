@@ -1,0 +1,14 @@
+README.md
+setup.py
+ffbox/__init__.py
+ffbox/benchmark_fs.py
+ffbox/cli.py
+ffbox/cp_venv_to_portable.sh
+ffbox/fileops.py
+ffbox/mount.py
+ffbox/upload.py
+ffbox.egg-info/PKG-INFO
+ffbox.egg-info/SOURCES.txt
+ffbox.egg-info/dependency_links.txt
+ffbox.egg-info/entry_points.txt
+ffbox.egg-info/top_level.txt
