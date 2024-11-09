@@ -46,7 +46,15 @@ find "$PORTABLE_VENV" -type l | while read -r SYMLINK_PATH; do
     echo "Replaced symbolic link $SYMLINK_PATH with actual file from $REAL_PATH"
 done
 
-# Step 4: Verify symbolic links have been replaced
+# Step 4: Update paths in the activate script
+# Update shebang in activate script to point to portable Python binary
+# sed -i "1s|.*|#!$(dirname "$(dirname "$BASH_SOURCE")")/bin/python|" "$PORTABLE_VENV/bin/activate"
+
+# Replace all instances of the original venv path with literal string of "$(dirname "$(dirname "$BASH_SOURCE")")" 
+# after replace activate should look like: export VIRTUAL_ENV="$(dirname "$(dirname "$BASH_SOURCE")")"
+sed -i 's|'"$ORIGINAL_VENV"'|$(dirname "$(dirname "$BASH_SOURCE")")|g' "$PORTABLE_VENV/bin/activate"
+
+# Step 5: Verify symbolic links have been replaced
 echo "Checking for remaining symbolic links in $PORTABLE_VENV:"
 find "$PORTABLE_VENV" -type l
 
