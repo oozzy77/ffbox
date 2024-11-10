@@ -4,6 +4,7 @@
 import os
 import shutil
 import subprocess
+import json
 
 def export_portable_venv_sh(original_venv_path, dest_venv_path = None):
     original_venv_path = os.path.abspath(original_venv_path)
@@ -13,7 +14,7 @@ def export_portable_venv_sh(original_venv_path, dest_venv_path = None):
     subprocess.run([os.path.join(os.path.dirname(__file__), "cp_venv_to_portable.sh"), original_venv_path, dest_venv_path])
     
 
-def push_to_cloud(local_dir, bucket_url, exclude_patterns = []):
+def push_to_cloud(local_dir, bucket_url):
     # rclone sync image_gen_pyinstaller test-conda:ff-image-gen/image_gen_pyinstaller --create-empty-src-dirs --progress --copy-links --transfers=16 --checkers=16 --multi-thread-streams=4
     if local_dir is None:
         local_dir = os.getcwd()
@@ -32,18 +33,20 @@ def push_to_cloud(local_dir, bucket_url, exclude_patterns = []):
         return
 
     print(f"🔵pushing {local_dir} to {bucket_url}")
+    ffbox_config = json.load(open(os.path.join(local_dir, ".ffbox/config.json")))
     rclone_cmd = [
         "rclone", "sync", local_dir, bucket_url,
         "--create-empty-src-dirs", "--progress", "--copy-links", "--transfers=8", "--checkers=8", "--multi-thread-streams=4",
         "--config", os.path.join(os.path.dirname(__file__), "rclone.conf")
     ]
-    for pattern in exclude_patterns:
+    print(f"🔵excluding {ffbox_config.get('exclude', [])}")
+    for pattern in ffbox_config.get("exclude", []):
         rclone_cmd.extend(["--exclude", pattern])
 
     subprocess.run(rclone_cmd)
 
 CACHE_DIR = os.environ.get("FFBOX_CACHE_DIR", "~/ffbox_cache")
-def pull_from_cloud(bucket_url, mountpoint):
+def pull_from_cloud(bucket_url, mountpoint = None):
     # to readonly mount: rclone mount s3:some-bucket /local/project --read-only --vfs-cache-mode full
     # to 2-way sync write: rclone mount s3:some-bucket /local/project --vfs-cache-mode full
     # mkdir sdvenv_pulled && rclone mount test-conda:ff-image-gen/sdvenv sdvenv_pulled --vfs-cache-mode full --file-perms 0755 --cache-dir ~/rclone_cache --dir-cache-time 24h --vfs-cache-max-age 24h
@@ -53,9 +56,13 @@ def pull_from_cloud(bucket_url, mountpoint):
     else:
         print(f"🔴only s3 bucket is supported, bucket url must start with s3://, got {bucket_url}")
         return
+    if mountpoint is None:
+        bucket_name = bucket_url.split(":")[1]
+        mountpoint = os.path.join(os.getcwd(), bucket_name.replace("/", "-"))
     env = os.environ.copy()
     env.pop('AWS_ACCESS_KEY_ID', None)
     env.pop('AWS_SECRET_ACCESS_KEY', None)
+    print(f"🔵mounting {bucket_url} to {mountpoint}")
     subprocess.run([
         "rclone", "mount", bucket_url, mountpoint,
         "--vfs-cache-mode", "full",
@@ -100,7 +107,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "push":
-        push_to_cloud(args.local_dir, args.bucket_url, args.region)
+        push_to_cloud(args.local_dir, args.bucket_url)
     elif args.command == "pull":
         pull_from_cloud(args.bucket_url, args.mountpoint)
     elif args.command == "portvenv":
