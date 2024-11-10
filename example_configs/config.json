@@ -1,0 +1,9 @@
+{
+    "exclude": [
+        "venv/**"
+    ],
+    "venv": "venv_portable",
+    "scripts": {
+        "run": "python main.py"
+    }
+}
