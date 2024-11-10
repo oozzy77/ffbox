@@ -37,7 +37,7 @@ def push_to_cloud(local_dir, bucket_url):
     rclone_cmd = [
         "rclone", "sync", local_dir, bucket_url,
         "--create-empty-src-dirs", "--progress", "--copy-links", "--transfers=8", "--checkers=8", "--multi-thread-streams=4",
-        "--config", os.path.join(os.path.dirname(__file__), "rclone.conf")
+        "--config", os.path.join(os.path.dirname(__file__), "rclone.conf"),
     ]
     print(f"🔵excluding {ffbox_config.get('exclude', [])}")
     for pattern in ffbox_config.get("exclude", []):
@@ -45,23 +45,20 @@ def push_to_cloud(local_dir, bucket_url):
 
     subprocess.run(rclone_cmd)
 
-CACHE_DIR = os.environ.get("FFBOX_CACHE_DIR", "~/ffbox_cache")
+CACHE_DIR = os.environ.get("FFBOX_CACHE_DIR", os.path.expanduser("~/ffbox_cache"))
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 def pull_from_cloud(bucket_url, mountpoint = None):
-    # to readonly mount: rclone mount s3:some-bucket /local/project --read-only --vfs-cache-mode full
-    # to 2-way sync write: rclone mount s3:some-bucket /local/project --vfs-cache-mode full
-    # mkdir sdvenv_pulled && rclone mount test-conda:ff-image-gen/sdvenv sdvenv_pulled --vfs-cache-mode full --file-perms 0755 --cache-dir ~/rclone_cache --dir-cache-time 24h --vfs-cache-max-age 24h
-    # clear AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
     if bucket_url.startswith("s3://"):
-        bucket_url = bucket_url.replace("s3://", "s3:")
+        # rclone anonymous access to public buckets
+        bucket_url = bucket_url.replace("s3://", ":s3,provider=AWS:")
     else:
         print(f"🔴only s3 bucket is supported, bucket url must start with s3://, got {bucket_url}")
         return
     if mountpoint is None:
         bucket_name = bucket_url.split(":")[1]
         mountpoint = os.path.join(os.getcwd(), bucket_name.replace("/", "-"))
-    env = os.environ.copy()
-    env.pop('AWS_ACCESS_KEY_ID', None)
-    env.pop('AWS_SECRET_ACCESS_KEY', None)
+    os.makedirs(mountpoint, exist_ok=True)
     print(f"🔵mounting {bucket_url} to {mountpoint}")
     subprocess.run([
         "rclone", "mount", bucket_url, mountpoint,
@@ -70,8 +67,9 @@ def pull_from_cloud(bucket_url, mountpoint = None):
         "--cache-dir", CACHE_DIR,
         "--dir-cache-time", "24h",
         "--vfs-cache-max-age", "24h",
-        "--config", os.path.join(os.path.dirname(__file__), "rclone.conf")
-    ], env=env)
+        "--config", os.path.join(os.path.dirname(__file__), "rclone.conf"),
+        "-vv"  # Increase verbosity
+    ])
 
 def clear_all_ram_page_cache():
     # sudo sync && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
