@@ -16,6 +16,10 @@ Pull s3 bucket to local directory
 
 `ffbox pull "s3://my-bucket/flux_image_gen"`
 
+Run python project
+
+`ffbox run "s3://my-bucket/flux_image_gen"`
+
 ### Example S3 bucket public read policy
 
 ```json
