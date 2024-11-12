@@ -10,7 +10,9 @@ import argparse
 import time
 
 CACHE_DIR = os.environ.get("FFBOX_CACHE_DIR", os.path.expanduser("~/ffbox_cache"))
+MOUNT_DIR = os.environ.get("FFBOX_MOUNT_DIR", os.path.expanduser("~/ffbox_mount"))
 os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(MOUNT_DIR, exist_ok=True)
 
 def export_portable_venv_sh(original_venv_path, dest_venv_path = None):
     original_venv_path = os.path.abspath(original_venv_path)
@@ -39,7 +41,11 @@ def push_to_cloud(local_dir, bucket_url):
         return
 
     print(f"🔵pushing {local_dir} to {bucket_url}")
-    ffbox_config = json.load(open(os.path.join(local_dir, ".ffbox/config.json")))
+    ffbox_config_path = os.path.join(local_dir, ".ffbox/config.json")
+    if not os.path.exists(ffbox_config_path):
+        ffbox_config = {}
+    else:
+        ffbox_config = json.load(open(ffbox_config_path))
     rclone_cmd = [
         "rclone", "sync", local_dir, bucket_url,
         "--create-empty-src-dirs", "--progress", "--copy-links", "--transfers=8", "--checkers=8", "--multi-thread-streams=4",
@@ -64,9 +70,10 @@ def pull_from_cloud(bucket_url, mountpoint = None):
         bucket_name = bucket_url.split(":")[1]
         if bucket_name.endswith("/"):
             bucket_name = bucket_name[:-1]
-        mountpoint = os.path.join(os.getcwd(), bucket_name.replace("/", "-"))
+        mountpoint = os.path.join(MOUNT_DIR, bucket_name.replace("/", "-"))
     os.makedirs(mountpoint, exist_ok=True)
     print(f"🔵mounting {bucket_url} to {mountpoint}")
+    # buffer size info: https://forum.rclone.org/t/whats-the-suitable-value-to-set-for-buffer-size-with-vfs-read-ahead/39971/4
     process = subprocess.Popen([
         "rclone", "mount", bucket_url, mountpoint,
         "--vfs-cache-mode", "full",
@@ -76,6 +83,15 @@ def pull_from_cloud(bucket_url, mountpoint = None):
         "--dir-cache-time", "24h",
         "--vfs-cache-max-age", "24h",
         "--config", os.path.join(os.path.dirname(__file__), "rclone.conf"),
+        # OPTIONAL - TESTING FOR PERFORMANCE OPTIMIZATION
+        "--vfs-cache-max-size", "100G",  # max size for cache
+        "--buffer-size", "0", 
+        "--vfs-read-ahead", "1024M",
+        "--low-level-retries", "1",  # reduce retries
+        "--retries", "1",  # lower retry count to avoid delay on failing connections
+        "--bwlimit", "10M",  # optional: limit bandwidth to avoid saturation
+        # "--log-level", "DEBUG", 
+        # "--log-file", os.path.join(os.path.dirname(__file__), "rclone_debug.log"),
     ])
     # Wait for the mount to be ready
     timeout = 10  # seconds
@@ -90,7 +106,7 @@ def pull_from_cloud(bucket_url, mountpoint = None):
             process.terminate()
             return
         else:
-            time.sleep(1) 
+            time.sleep(0.01) 
     return mountpoint   
 
 def run_python_project(bucket_url, extra_args):
