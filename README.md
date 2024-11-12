@@ -10,11 +10,23 @@ Deploy your python AI app to cloud by just pushing your code to s3, and run it w
 
 Push local python project to s3 bucket
 
-`ffbox push "s3://my-bucket/flux_image_gen"`
+`cd my_python_project`
+
+`ffbox push "s3://my_bucket/my_python_project"`
 
 Pull s3 bucket to local directory
 
 `ffbox pull "s3://my-bucket/flux_image_gen"`
+
+Run python project
+
+`ffbox run "s3://my-bucket/flux_image_gen"`
+
+### Benchmarks
+
+no cache in ffbox_cache/ cold start - Pillow image processing:
+
+`ffbox run "s3://ff-image-gen/sd3"` - 11s
 
 ### Example S3 bucket public read policy
 
