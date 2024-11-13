@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 
-
 import os
 import shlex
 import shutil
 import subprocess
 import json
-import argparse
 import time
+import shlex
 
 CACHE_DIR = os.environ.get("FFBOX_CACHE_DIR", os.path.expanduser("~/ffbox_cache"))
 MOUNT_DIR = os.environ.get("FFBOX_MOUNT_DIR", os.path.expanduser("~/ffbox_mount"))
@@ -26,6 +25,8 @@ def push_to_cloud(local_dir, bucket_url):
     # rclone sync image_gen_pyinstaller test-conda:ff-image-gen/image_gen_pyinstaller --create-empty-src-dirs --progress --copy-links --transfers=16 --checkers=16 --multi-thread-streams=4
     if local_dir is None:
         local_dir = os.getcwd()
+    else:
+        local_dir = os.path.abspath(local_dir)
     
     if bucket_url.startswith("s3://"):
         bucket_url = bucket_url.replace("s3://", "s3:")
@@ -46,6 +47,12 @@ def push_to_cloud(local_dir, bucket_url):
         ffbox_config = {}
     else:
         ffbox_config = json.load(open(ffbox_config_path))
+
+    run_cmd = ffbox_config.get("scripts", {}).get("example_run") or ffbox_config.get("scripts", {}).get("run")
+    print(f"🔵run command: {run_cmd}")
+    if run_cmd is not None:
+        log_file_read_order(run_cmd, local_dir)
+    
     rclone_cmd = [
         "rclone", "sync", local_dir, bucket_url,
         "--create-empty-src-dirs", "--progress", "--copy-links", "--transfers=8", "--checkers=8", "--multi-thread-streams=4",
@@ -120,12 +127,8 @@ def run_python_project(bucket_url, extra_args):
     if not run_cmd:
         print(f"🔴no run command found in {ffbox_config_path}, please add a run command in the config file")
         return
-    # Split the run command into a list of arguments
-    run_cmd_list = shlex.split(run_cmd)
-    # Append extra arguments
-    run_cmd_list.extend(extra_args)
-    # Join back into a single string if needed
-    run_cmd = ' '.join(run_cmd_list)
+    # Append extra arguments directly to the run command string
+    run_cmd += ' ' + ' '.join(extra_args)
     print(f"🔵running {run_cmd} in {mountpoint}")
     subprocess.run(run_cmd, shell=True, cwd=mountpoint)
 
@@ -133,6 +136,30 @@ def clear_all_ram_page_cache():
     # sudo sync && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
     subprocess.run(["sudo", "sync"])
     subprocess.run(["sudo", "echo", "3", ">", "/proc/sys/vm/drop_caches"])
+
+
+def log_file_read_order(run_cmd, push_dir):
+    log_file_path = os.path.join(push_dir, ".ffbox/read_order.log")
+    # Quote the run_cmd to handle any special characters, including single quotes
+    quoted_run_cmd = shlex.quote(run_cmd)
+    
+    # Define the full strace command
+    full_cmd = f"strace -e trace=open,openat -f bash -c {quoted_run_cmd} 2>&1 | awk -F '\"' '/openat/ {{print $2}}' > {log_file_path}"
+    print(f"🔵logging file read order to {log_file_path}")
+    # Run the command using shell=True to process the entire string as a single shell command
+    subprocess.run(full_cmd, shell=True, executable="/bin/bash")
+    
+    # Filter the logged paths
+    with open(log_file_path, 'r') as log_file:
+        lines = log_file.readlines()
+    
+    filtered_lines = [line for line in lines if line.startswith(push_dir)]
+    
+    # Overwrite the original log file with the filtered paths
+    with open(log_file_path, 'w') as log_file:
+        log_file.writelines(filtered_lines)
+    
+    print(f"🔵filtered file read order logged to {log_file_path}")
 
 def main():
     print("start syncing with image-gen")
