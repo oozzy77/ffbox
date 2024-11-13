@@ -7,6 +7,8 @@ import subprocess
 import json
 import time
 import shlex
+import traceback
+import threading
 
 CACHE_DIR = os.environ.get("FFBOX_CACHE_DIR", os.path.expanduser("~/ffbox_cache"))
 MOUNT_DIR = os.environ.get("FFBOX_MOUNT_DIR", os.path.expanduser("~/ffbox_mount"))
@@ -49,9 +51,12 @@ def push_to_cloud(local_dir, bucket_url):
         ffbox_config = json.load(open(ffbox_config_path))
 
     run_cmd = ffbox_config.get("scripts", {}).get("example_run") or ffbox_config.get("scripts", {}).get("run")
-    print(f"🔵run command: {run_cmd}")
     if run_cmd is not None:
-        log_file_read_order(run_cmd, local_dir)
+        try:
+            log_file_read_order(run_cmd, local_dir)
+        except Exception as e:
+            print(f"🟠failed to log file read order: {e}")
+            traceback.print_exc()
     
     rclone_cmd = [
         "rclone", "sync", local_dir, bucket_url,
@@ -66,7 +71,7 @@ def push_to_cloud(local_dir, bucket_url):
     subprocess.run(rclone_cmd)
 
 
-def pull_from_cloud(bucket_url, mountpoint = None):
+def mount_from_cloud(bucket_url, mountpoint = None):
     if bucket_url.startswith("s3://"):
         # rclone anonymous access to public buckets
         bucket_url = bucket_url.replace("s3://", "s3-public:")
@@ -117,7 +122,7 @@ def pull_from_cloud(bucket_url, mountpoint = None):
     return mountpoint   
 
 def run_python_project(bucket_url, extra_args):
-    mountpoint = pull_from_cloud(bucket_url)
+    mountpoint = mount_from_cloud(bucket_url)
     ffbox_config_path = os.path.join(mountpoint, ".ffbox/config.json")
     if not os.path.exists(ffbox_config_path):
         print(f"🔴no ffbox config file found in {os.getcwd()}, please add ffbox/config.json first")
@@ -129,8 +134,45 @@ def run_python_project(bucket_url, extra_args):
         return
     # Append extra arguments directly to the run command string
     run_cmd += ' ' + ' '.join(extra_args)
+    
+    # Start background thread pool to pull files in a non-blocking way
+    threading.Thread(target=background_pulling_read_order, args=(mountpoint,), daemon=True).start()
+    
     print(f"🔵running {run_cmd} in {mountpoint}")
     subprocess.run(run_cmd, shell=True, cwd=mountpoint)
+
+def background_pulling_read_order(mountpoint, num_threads=8):
+    read_order_log_path = os.path.join(mountpoint, ".ffbox/read_order.log")
+    
+    if not os.path.exists(read_order_log_path):
+        print(f"🟠 No read order log found at {read_order_log_path}")
+        return
+
+    with open(read_order_log_path, 'r') as log_file:
+        file_paths = [line.strip() for line in log_file.readlines()]
+
+    def cache_file(file_path):
+        try:
+            with open(file_path, 'rb') as f:
+                f.read()  # Read the file to cache it
+            print(f"🔵 Cached {file_path}")
+        except Exception as e:
+            print(f"🟠 Failed to cache {file_path}: {e}")
+            pass
+
+    def worker():
+        while file_paths:
+            file_path = file_paths.pop(0)
+            cache_file(os.path.join(mountpoint, file_path))
+
+    threads = []
+    for _ in range(num_threads):
+        thread = threading.Thread(target=worker)
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
 
 def clear_all_ram_page_cache():
     # sudo sync && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
@@ -149,15 +191,23 @@ def log_file_read_order(run_cmd, push_dir):
     # Run the command using shell=True to process the entire string as a single shell command
     subprocess.run(full_cmd, shell=True, executable="/bin/bash")
     
-    # Filter the logged paths
+    # Set to track unique paths
+    paths_set = set()
+    filtered_lines = []
+
     with open(log_file_path, 'r') as log_file:
         lines = log_file.readlines()
     
-    filtered_lines = [line for line in lines if line.startswith(push_dir)]
-    
-    # Overwrite the original log file with the filtered paths
+    for line in lines:
+        if line.startswith(push_dir):
+            rel_path = os.path.relpath(line.strip(), push_dir)
+            if rel_path not in paths_set:
+                paths_set.add(rel_path)
+                filtered_lines.append(rel_path)
+
+    # Overwrite the original log file with the filtered and unique relative paths
     with open(log_file_path, 'w') as log_file:
-        log_file.writelines(filtered_lines)
+        log_file.writelines(f"{line}\n" for line in filtered_lines)
     
     print(f"🔵filtered file read order logged to {log_file_path}")
 
@@ -197,7 +247,7 @@ def main():
     if args.command == "push":
         push_to_cloud(args.local_dir, args.bucket_url)
     elif args.command == "pull":
-        pull_from_cloud(args.bucket_url, args.mountpoint)
+        mount_from_cloud(args.bucket_url, args.mountpoint)
     elif args.command == "portvenv":
         export_portable_venv_sh(args.original_venv_path, args.dest_venv_path)
     elif args.command == "run":
