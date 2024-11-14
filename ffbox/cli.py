@@ -141,7 +141,7 @@ def run_python_project(bucket_url, extra_args):
     print(f"🔵running {run_cmd} in {mountpoint}")
     subprocess.run(run_cmd, shell=True, cwd=mountpoint)
 
-def background_pulling_read_order(mountpoint, num_threads=8):
+def background_pulling_read_order(mountpoint, num_threads=16):
     read_order_log_path = os.path.join(mountpoint, ".ffbox/read_order.log")
     
     if not os.path.exists(read_order_log_path):
@@ -155,14 +155,19 @@ def background_pulling_read_order(mountpoint, num_threads=8):
         try:
             with open(file_path, 'rb') as f:
                 f.read()  # Read the file to cache it
-            print(f"🔵 Cached {file_path}")
+            # print(f"🔵 Cached {file_path}")
         except Exception as e:
-            print(f"🟠 Failed to cache {file_path}: {e}")
+            # print(f"🟠 Failed to cache {file_path}: {e}")
             pass
 
+    lock = threading.Lock()  # Create a lock object
+
     def worker():
-        while file_paths:
-            file_path = file_paths.pop(0)
+        while True:
+            with lock:  # Acquire the lock before modifying the list
+                if not file_paths:
+                    break
+                file_path = file_paths.pop(0)
             cache_file(os.path.join(mountpoint, file_path))
 
     threads = []
@@ -174,19 +179,13 @@ def background_pulling_read_order(mountpoint, num_threads=8):
     for thread in threads:
         thread.join()
 
-def clear_all_ram_page_cache():
-    # sudo sync && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
-    subprocess.run(["sudo", "sync"])
-    subprocess.run(["sudo", "echo", "3", ">", "/proc/sys/vm/drop_caches"])
-
-
 def log_file_read_order(run_cmd, push_dir):
-    log_file_path = os.path.join(push_dir, ".ffbox/read_order.log")
+    log_file_path = os.path.join(push_dir, ".ffbox/unfiltered_read_order.log")
     # Quote the run_cmd to handle any special characters, including single quotes
     quoted_run_cmd = shlex.quote(run_cmd)
     
     # Define the full strace command
-    full_cmd = f"strace -e trace=open,openat -f bash -c {quoted_run_cmd} 2>&1 | awk -F '\"' '/openat/ {{print $2}}' > {log_file_path}"
+    full_cmd = f"strace -e trace=open,openat -f bash -c {quoted_run_cmd} 2>&1 | awk -F '\"' '/openat/ {{print $2}}' | while read path; do if [ -d \"$path\" ]; then echo \"$path/\"; else echo \"$path\"; fi; done > {log_file_path}"
     print(f"🔵logging file read order to {log_file_path}")
     # Run the command using shell=True to process the entire string as a single shell command
     subprocess.run(full_cmd, shell=True, executable="/bin/bash")
@@ -204,12 +203,12 @@ def log_file_read_order(run_cmd, push_dir):
             if rel_path not in paths_set:
                 paths_set.add(rel_path)
                 filtered_lines.append(rel_path)
-
+    filtered_log_path = os.path.join(push_dir, ".ffbox/read_order.log")
     # Overwrite the original log file with the filtered and unique relative paths
-    with open(log_file_path, 'w') as log_file:
+    with open(filtered_log_path, 'w') as log_file:
         log_file.writelines(f"{line}\n" for line in filtered_lines)
     
-    print(f"🔵filtered file read order logged to {log_file_path}")
+    print(f"🔵filtered file read order logged to {filtered_log_path}")
 
 def main():
     print("start syncing with image-gen")
