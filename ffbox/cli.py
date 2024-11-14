@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -185,31 +186,54 @@ def log_file_read_order(run_cmd, push_dir):
     quoted_run_cmd = shlex.quote(run_cmd)
     
     # Define the full strace command
-    full_cmd = f"strace -e trace=open,openat -f bash -c {quoted_run_cmd} 2>&1 | awk -F '\"' '/openat/ {{print $2}}' | while read path; do if [ -d \"$path\" ]; then echo \"$path/\"; else echo \"$path\"; fi; done > {log_file_path}"
+    # full_cmd = f"strace -e trace=open,openat -f bash -c {quoted_run_cmd} 2>&1 | awk -F '\"' '/openat/ {{print $2}}' | while read path; do if [ -d \"$path\" ]; then echo \"$path/\"; else echo \"$path\"; fi; done > {log_file_path}"
+
+    full_cmd = f"strace -e trace=openat,open,stat,newfstatat,lstat -f bash -c {quoted_run_cmd} > {log_file_path} 2>&1"
     print(f"🔵logging file read order to {log_file_path}")
     # Run the command using shell=True to process the entire string as a single shell command
     subprocess.run(full_cmd, shell=True, executable="/bin/bash")
     
     # Set to track unique paths
-    paths_set = set()
-    filtered_lines = []
+    # paths_set = set()
+    # filtered_lines = []
 
-    with open(log_file_path, 'r') as log_file:
-        lines = log_file.readlines()
+    # with open(log_file_path, 'r') as log_file:
+    #     lines = log_file.readlines()
     
-    for line in lines:
-        if line.startswith(push_dir):
-            rel_path = os.path.relpath(line.strip(), push_dir)
-            if rel_path not in paths_set:
-                paths_set.add(rel_path)
-                filtered_lines.append(rel_path)
+    # for line in lines:
+    #     if line.startswith(push_dir):
+    #         rel_path = os.path.relpath(line.strip(), push_dir)
+    #         if rel_path not in paths_set:
+    #             paths_set.add(rel_path)
+    #             filtered_lines.append(rel_path)
     filtered_log_path = os.path.join(push_dir, ".ffbox/read_order.log")
     # Overwrite the original log file with the filtered and unique relative paths
-    with open(filtered_log_path, 'w') as log_file:
-        log_file.writelines(f"{line}\n" for line in filtered_lines)
+    # with open(filtered_log_path, 'w') as log_file:
+    #     log_file.writelines(f"{line}\n" for line in filtered_lines)
+    print(f"🔵parsing strace output from {log_file_path} to {filtered_log_path}")
+    parse_strace_output(log_file_path, filtered_log_path)
     
     print(f"🔵filtered file read order logged to {filtered_log_path}")
 
+def parse_strace_output(file_path, output_file_path):
+    # Open output file in write mode to create or clear it if it already exists
+    with open(file_path, 'r') as file, open(output_file_path, 'w') as output_file:
+        for line in file:
+            # Check if the line contains one of the desired operations and file paths
+            match = re.search(r'(newfstatat|openat|stat|lstat)\(.*?,\s*"([^"]+)",', line)
+            if match:
+                operation = match.group(1)
+                filepath = match.group(2)
+                
+                # Check if the path is a directory using os.path.isdir
+                if os.path.isdir(filepath):
+                    formatted_path = f"{filepath}/"
+                else:
+                    formatted_path = filepath
+
+                # Write the result directly to the output file
+                output_file.write(f'{operation} "{formatted_path}"\n')
+                
 def main():
     print("start syncing with image-gen")
     # rclone sync test-conda:test-conda /home/ec2-user/test-conda --create-empty-src-dirs
