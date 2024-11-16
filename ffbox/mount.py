@@ -11,7 +11,7 @@ import errno
 # import boto3
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 
-from ffmount.fileops import META_DIR, get_getattr_dir_save_path, get_getattr_file_save_path, getattr_from_cloud, restore_file_attributes
+from ffbox.fileops import META_DIR, get_getattr_dir_save_path, get_getattr_file_save_path, restore_file_attributes
 
 class Passthrough(Operations):
     def __init__(self, root, s3_url):
@@ -80,7 +80,8 @@ class Passthrough(Operations):
         print(f'👇getting attributes of {path}')
         full_path = self._full_path(path)
         if not os.path.exists(full_path):
-            attr_data = self.cloud_getattr(full_path).get('attr')
+            pass
+            # attr_data = self.cloud_getattr(full_path).get('attr')
         else:
             st = os.lstat(full_path)
             attr_data = dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
@@ -207,6 +208,18 @@ def main(s3_url, mountpoint, prefix='/home/ec2-user/realer22', foreground=True):
     print(f"real storage path: {real_storage_path}, fake storage path: {fake_path}")
     FUSE(Passthrough(real_storage_path, s3_url), fake_path, nothreads=True, foreground=foreground)
 
+def local_mount(mountpoint,  foreground=True):
+    mountpoint = os.path.abspath(mountpoint)
+    os.makedirs(mountpoint, exist_ok=True)
+    fake_path = mountpoint + '_realstore'
+    os.makedirs(fake_path, exist_ok=True)
+    print(f"real storage path: {fake_path}, fake storage path: {mountpoint}")
+    FUSE(Passthrough(mountpoint, ''), fake_path, foreground=foreground)
 
 if __name__ == '__main__':
-    main(sys.argv[1], sys.argv[2])
+    if len(sys.argv) == 2:
+        local_mount(sys.argv[1])
+    elif len(sys.argv) == 3:
+        main(sys.argv[1], sys.argv[2])
+    else:
+        print('usage: python ffbox/ffbox/mount.py [s3_url]  <mountpoint>')

@@ -84,7 +84,13 @@ def mount_from_cloud(bucket_url, mountpoint = None):
         if bucket_name.endswith("/"):
             bucket_name = bucket_name[:-1]
         mountpoint = os.path.join(MOUNT_DIR, bucket_name.replace("/", "-"))
-    os.makedirs(mountpoint, exist_ok=True)
+    print(f"file exists: {os.path.exists(mountpoint)}")
+    try:
+        os.makedirs(mountpoint, exist_ok=True)
+    except Exception as e:
+        print(f"🟠failed to make dir {mountpoint}: {e}")
+        traceback.print_exc()
+
     print(f"🔵mounting {bucket_url} to {mountpoint}")
     # buffer size info: https://forum.rclone.org/t/whats-the-suitable-value-to-set-for-buffer-size-with-vfs-read-ahead/39971/4
     process = subprocess.Popen([
@@ -98,8 +104,8 @@ def mount_from_cloud(bucket_url, mountpoint = None):
         "--config", os.path.join(os.path.dirname(__file__), "rclone.conf"),
         # OPTIONAL - TESTING FOR PERFORMANCE OPTIMIZATION
         "--vfs-cache-max-size", "100G",  # max size for cache
-        "--buffer-size", "0", 
-        "--vfs-read-ahead", "1024M",
+        # "--buffer-size", "0", 
+        "--vfs-read-ahead", "10G",
         "--low-level-retries", "1",  # reduce retries
         "--retries", "1",  # lower retry count to avoid delay on failing connections
         "--bwlimit", "10M",  # optional: limit bandwidth to avoid saturation
@@ -142,7 +148,7 @@ def run_python_project(bucket_url, extra_args):
     print(f"🔵running {run_cmd} in {mountpoint}")
     subprocess.run(run_cmd, shell=True, cwd=mountpoint)
 
-def background_pulling_read_order(mountpoint, num_threads=16):
+def background_pulling_read_order(mountpoint, num_threads=10):
     read_order_log_path = os.path.join(mountpoint, ".ffbox/read_order.log")
     
     if not os.path.exists(read_order_log_path):
@@ -152,13 +158,21 @@ def background_pulling_read_order(mountpoint, num_threads=16):
     with open(read_order_log_path, 'r') as log_file:
         file_paths = [line.strip() for line in log_file.readlines()]
 
-    def cache_file(file_path):
+    def cache_file(strace_line):
+        print(f"🔵 Caching {strace_line}")
+        fileop, rel_path = strace_line.split(' ')
+        abs_path = os.path.join(mountpoint, rel_path)
         try:
-            with open(file_path, 'rb') as f:
-                f.read()  # Read the file to cache it
-            # print(f"🔵 Cached {file_path}")
+            if (fileop == 'openat' or fileop == 'open') and rel_path[-1] != '/':
+                with open(abs_path, 'rb') as f:
+                    f.read()  # Read the file to cache it
+            elif (fileop == 'openat' or fileop == 'open') and rel_path[-1] == '/':
+                os.listdir(abs_path)
+            elif fileop == 'stat' or fileop == 'lstat' or fileop == 'newfstatat': 
+                os.stat(abs_path)
+            # print(f"🔵 Cached {abs_path}")
         except Exception as e:
-            # print(f"🟠 Failed to cache {file_path}: {e}")
+            print(f"🟠 Failed to cache {abs_path}: {e}")
             pass
 
     lock = threading.Lock()  # Create a lock object
@@ -211,11 +225,15 @@ def log_file_read_order(run_cmd, push_dir):
     # with open(filtered_log_path, 'w') as log_file:
     #     log_file.writelines(f"{line}\n" for line in filtered_lines)
     print(f"🔵parsing strace output from {log_file_path} to {filtered_log_path}")
-    parse_strace_output(log_file_path, filtered_log_path)
+    parse_strace_output(log_file_path, filtered_log_path, push_dir)
     
     print(f"🔵filtered file read order logged to {filtered_log_path}")
 
-def parse_strace_output(file_path, output_file_path):
+
+def parse_strace_output(file_path, output_file_path, push_dir):
+    # Track unique paths to avoid duplicates
+    output_line_set = set()
+
     # Open output file in write mode to create or clear it if it already exists
     with open(file_path, 'r') as file, open(output_file_path, 'w') as output_file:
         for line in file:
@@ -223,22 +241,30 @@ def parse_strace_output(file_path, output_file_path):
             match = re.search(r'(newfstatat|openat|stat|lstat)\(.*?,\s*"([^"]+)",', line)
             if match:
                 operation = match.group(1)
-                filepath = match.group(2)
+                abs_path = match.group(2)
                 
-                # Check if the path is a directory using os.path.isdir
-                if os.path.isdir(filepath):
-                    formatted_path = f"{filepath}/"
-                else:
-                    formatted_path = filepath
+                # Convert absolute path to relative path with respect to push_dir
+                try:
+                    rel_path = os.path.relpath(abs_path, push_dir)
+                    
+                    # Check if the path is inside the push_dir
+                    if rel_path.startswith(".."):
+                        continue  # Skip paths outside push_dir
 
-                # Write the result directly to the output file
-                output_file.write(f'{operation} "{formatted_path}"\n')
-                
-def main():
-    print("start syncing with image-gen")
-    # rclone sync test-conda:test-conda /home/ec2-user/test-conda --create-empty-src-dirs
-    subprocess.run(["rclone", "sync", "image-gen:image-gen", "/home/ec2-user/image-gen", "--create-empty-src-dirs"])
+                    # Ensure trailing slash for directories
+                    if os.path.isdir(abs_path):
+                        rel_path = f"{rel_path}/"
+                    
+                    output_line = f'{operation} {rel_path}'
 
+                    # Write the result only if it's not a duplicate
+                    if output_line not in output_line_set:
+                        output_file.write(output_line + '\n')
+                        output_line_set.add(output_line)
+
+                except ValueError:
+                    # Skip paths that can't be converted to a relative path from push_dir
+                    continue
 
 def main():
     import argparse
