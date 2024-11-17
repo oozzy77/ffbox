@@ -27,6 +27,9 @@ else:
 
 META_DIR = '.ffbox/tree'
 
+uid = os.getuid()
+gid = os.getgid()
+
 class Passthrough(Operations):
     def __init__(self, root, s3_url = None):
         self.root = root
@@ -61,9 +64,9 @@ class Passthrough(Operations):
             key += '/'
         return key
 
-    def cloud_getattr(self, partial):
-        key = self.cloud_object_key(partial)
-        print(f'🟠 cloud getting attributes of {partial} ,', f'bucket: {self.bucket}, key: {key}')
+    def cloud_getattr(self, path):
+        key = self.cloud_object_key(path)
+        print(f'🟠 cloud getting attributes of {path} ,', f'bucket: {self.bucket}, key: {key}')
         
         try:
             # First, try to get the object metadata
@@ -81,15 +84,28 @@ class Passthrough(Operations):
                 'st_uid': os.getuid(),                             # User ID of owner
                 'st_gid': os.getgid(),                             # Group ID of owner
             }
+
+            # Create an empty placeholder file with the attributes
+            file_path = os.path.join(self.root, path.strip('/'))
+            with open(file_path, 'wb') as f:
+                pass  # Create an empty file
+            os.utime(file_path, (response['LastModified'].timestamp(), response['LastModified'].timestamp()))
+            os.chmod(file_path, 0o100755)
+            os.chown(file_path, uid, gid)
             return attr_data
         except Exception as e:
             # If the object is not found, check if it's a directory
             print(f'🟠object not found, checking if directory {key}')
-            response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=self.cloud_folder_key(partial))
-            print(f'🟠list_objects_v2 response: {response}')
+            response = s3_client.list_objects_v2(
+                Bucket=self.bucket,
+                Prefix=self.cloud_folder_key(path),
+                MaxKeys=1,  # We only need to know if there's at least one object
+                Delimiter='/'  # This makes the operation more efficient for folders
+            )
 
             if 'Contents' in response or 'CommonPrefixes' in response:
                 # Return default attributes for a directory
+                os.makedirs(os.path.join(self.root, path.strip('/')), exist_ok=True)
                 return {
                     'st_atime': 0,
                     'st_ctime': 0,
@@ -102,16 +118,6 @@ class Passthrough(Operations):
                 }
             else:
                 raise FuseOSError(errno.ENOENT)
-    
-    def create_placeholder(file_info):
-        file_name, obj, root, path, uid, gid = file_info
-        file_path = os.path.join(root, path.lstrip('/'), file_name)
-        if not os.path.exists(file_path):
-            with open(file_path, 'wb') as f:
-                pass  # Create an empty file
-            os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
-            os.chmod(file_path, 0o100755)
-            os.chown(file_path, uid, gid)
 
     def cloud_readdir(self, path):
         print(f'🟠reading cloud directory path: {path}')
@@ -131,8 +137,6 @@ class Passthrough(Operations):
 
         # Add files to dirents
         if 'Contents' in response:
-            uid = os.getuid()
-            gid = os.getgid()
             for obj in response['Contents']:
                 file_name = obj['Key'].split('/')[-1]
                 yield file_name
