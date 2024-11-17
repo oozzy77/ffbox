@@ -11,6 +11,8 @@ import shlex
 import traceback
 import threading
 
+from ffbox.mount import ffmount
+
 CACHE_DIR = os.environ.get("FFBOX_CACHE_DIR", os.path.expanduser("~/ffbox_cache"))
 MOUNT_DIR = os.environ.get("FFBOX_MOUNT_DIR", os.path.expanduser("~/ffbox_mount"))
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -294,6 +296,11 @@ def main():
     parser_run.add_argument("bucket_url", nargs='?', default=None, help="URL of the S3 bucket of the python project")
     parser_run.add_argument('extra_args', nargs=argparse.REMAINDER, help="Additional arguments for the project")
 
+    # Mount command
+    parser_mount = subparsers.add_parser("mount", help="Mount an S3 bucket to a local directory")
+    parser_mount.add_argument("s3_url", help="URL of the S3 bucket")
+    parser_mount.add_argument("mountpoint", help="Local directory to mount the S3 bucket to")
+
     args = parser.parse_args()
 
     if args.command == "push":
@@ -304,6 +311,8 @@ def main():
         export_portable_venv_sh(args.original_venv_path, args.dest_venv_path)
     elif args.command == "run":
         run_python_project(args.bucket_url, args.extra_args)
+    elif args.command == "mount":
+        ffmount(args.s3_url, args.mountpoint)
     else:
         parser.print_help()
 
