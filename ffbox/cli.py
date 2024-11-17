@@ -300,6 +300,7 @@ def main():
     parser_mount = subparsers.add_parser("mount", help="Mount an S3 bucket to a local directory")
     parser_mount.add_argument("s3_url", help="URL of the S3 bucket")
     parser_mount.add_argument("mountpoint", help="Local directory to mount the S3 bucket to")
+    parser_mount.add_argument("--clean", action="store_true", help="Clean the cache directory before mounting")
 
     args = parser.parse_args()
 
@@ -312,7 +313,7 @@ def main():
     elif args.command == "run":
         run_python_project(args.bucket_url, args.extra_args)
     elif args.command == "mount":
-        ffmount(args.s3_url, args.mountpoint)
+        ffmount(args.s3_url, args.mountpoint, clean_cache=args.clean)
     else:
         parser.print_help()
 

@@ -86,6 +86,8 @@ class Passthrough(Operations):
             # If the object is not found, check if it's a directory
             print(f'🟠object not found, checking if directory {key}')
             response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=self.cloud_folder_key(partial))
+            print(f'🟠list_objects_v2 response: {response}')
+
             if 'Contents' in response or 'CommonPrefixes' in response:
                 # Return default attributes for a directory
                 return {
@@ -101,33 +103,52 @@ class Passthrough(Operations):
             else:
                 raise FuseOSError(errno.ENOENT)
     
+    def create_placeholder(file_info):
+        file_name, obj, root, path, uid, gid = file_info
+        file_path = os.path.join(root, path.lstrip('/'), file_name)
+        if not os.path.exists(file_path):
+            with open(file_path, 'wb') as f:
+                pass  # Create an empty file
+            os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
+            os.chmod(file_path, 0o100755)
+            os.chown(file_path, uid, gid)
+
     def cloud_readdir(self, path):
-        if os.path.exists(os.path.join(self.root, META_DIR, path, 'dirents.json')):
-            print(f'🔵path cache exists for {path}')
-            with open(os.path.join(self.root, META_DIR, path, 'dirents.json'), 'r') as f:
-                return json.load(f)
         print(f'🟠reading cloud directory path: {path}')
         # List objects in the S3 bucket with the specified prefix
         response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=self.cloud_folder_key(path), Delimiter='/')        
-        dirents = ['.', '..']
         
+        yield '.'
+        yield '..'
+
         # Add directories (common prefixes) to dirents
         if 'CommonPrefixes' in response:
             for common_prefix in response['CommonPrefixes']:
                 dir_name = common_prefix['Prefix'].rstrip('/').split('/')[-1]
-                dirents.append(dir_name)
-        
+                yield dir_name
+                os.makedirs(os.path.join(self.root, path.lstrip('/'), dir_name), exist_ok=True)
+                
+
         # Add files to dirents
         if 'Contents' in response:
+            uid = os.getuid()
+            gid = os.getgid()
             for obj in response['Contents']:
                 file_name = obj['Key'].split('/')[-1]
-                dirents.append(file_name)
-        print(f'🟠dirents: {dirents}')
-        # with open(os.path.join(self.root, META_DIR, path, 'dirents.json'), 'w') as f:
-        #     json.dump(dirents, f)
-        
-        for r in dirents:
-            yield r
+                yield file_name
+                
+                # Create an empty placeholder file with the attributes
+                file_path = os.path.join(self.root, path.lstrip('/'), file_name)
+                if not os.path.exists(file_path):
+                    with open(file_path, 'wb') as f:
+                        pass  # Create an empty file
+                    # Set file attributes
+                    os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
+                    os.chmod(file_path, 0o100755)  # Set file mode to executable
+                    os.chown(file_path, uid, gid)  # Set ownership to current user
+
+        # mark this path as completed cached
+        os.makedirs(os.path.join(self.root, META_DIR, path.strip('/')), exist_ok=True)
 
     # Filesystem methods
     # ==================
@@ -157,14 +178,18 @@ class Passthrough(Operations):
 
     def readdir(self, path, fh):
         print(f'👇reading directory {path}')
-        # full_path = self._full_path(path)
-
-        # dirents = ['.', '..']
-        # if os.path.isdir(full_path):
-        #     dirents.extend(os.listdir(full_path))
-        # for r in dirents:
-        #     yield r
-        yield from self.cloud_readdir(path)
+        
+        cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
+        if os.path.exists(cache_path):
+            full_path = self._full_path(path)
+            print(f'🟢 path cache exists for {path}')
+            dirents = ['.', '..']
+            if os.path.isdir(full_path):
+                dirents.extend(os.listdir(full_path))
+            for r in dirents:
+                yield r
+        else:
+            yield from self.cloud_readdir(path)
 
     def readlink(self, path):
         pathname = os.readlink(self._full_path(path))
@@ -251,7 +276,7 @@ class Passthrough(Operations):
     def fsync(self, path, fdatasync, fh):
         return self.flush(path, fh)
 
-def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground=True):
+def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground=True, clean_cache=False):
     fake_path = os.path.abspath(mountpoint)
     if s3_url:
         s3_bucket_name = '/'.join(s3_url.split('://')[1:])
@@ -268,8 +293,11 @@ def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground
             return
         else:
             shutil.rmtree(fake_path)
+    if clean_cache:
+        shutil.rmtree(real_path)
     os.makedirs(fake_path, exist_ok=True)
     os.makedirs(real_path, exist_ok=True)
+
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
     FUSE(Passthrough(real_path, s3_url), fake_path, foreground=foreground)
 
