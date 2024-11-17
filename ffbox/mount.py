@@ -53,9 +53,17 @@ class Passthrough(Operations):
         partial = partial.strip('/')
         return f'{self.prefix}/{partial}'
 
+    def cloud_folder_key(self, partial):
+        if partial.startswith('/'):
+            partial = partial[1:]
+        key = f'{self.prefix}/{partial}'
+        if not key.endswith('/'):
+            key += '/'
+        return key
+
     def cloud_getattr(self, partial):
-        print(f'🟠 cloud getting attributes of {partial} ,', f'bucket: {self.bucket}, key: {self.cloud_object_key(partial)}')
         key = self.cloud_object_key(partial)
+        print(f'🟠 cloud getting attributes of {partial} ,', f'bucket: {self.bucket}, key: {key}')
         
         try:
             # First, try to get the object metadata
@@ -77,7 +85,7 @@ class Passthrough(Operations):
         except Exception as e:
             # If the object is not found, check if it's a directory
             print(f'🟠object not found, checking if directory {key}')
-            response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=key)
+            response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=self.cloud_folder_key(partial))
             if 'Contents' in response or 'CommonPrefixes' in response:
                 # Return default attributes for a directory
                 return {
@@ -94,16 +102,13 @@ class Passthrough(Operations):
                 raise FuseOSError(errno.ENOENT)
     
     def cloud_readdir(self, path):
-        prefix = self.cloud_object_key(path)
         if os.path.exists(os.path.join(self.root, META_DIR, path, 'dirents.json')):
             print(f'🔵path cache exists for {path}')
             with open(os.path.join(self.root, META_DIR, path, 'dirents.json'), 'r') as f:
                 return json.load(f)
-        print(f'🟠reading cloud directory {prefix}')
+        print(f'🟠reading cloud directory path: {path}')
         # List objects in the S3 bucket with the specified prefix
-        response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=prefix, Delimiter='/')
-        print(f'🟠response: {response}')
-        
+        response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=self.cloud_folder_key(path), Delimiter='/')        
         dirents = ['.', '..']
         
         # Add directories (common prefixes) to dirents
