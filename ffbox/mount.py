@@ -13,6 +13,7 @@ from botocore import UNSIGNED
 from botocore.client import Config
 from urllib.parse import urlparse
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
+import botocore
 
 aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -24,6 +25,7 @@ else:
     # If no credentials, use unsigned configuration
     s3_client = boto3.client('s3', config=Config(signature_version=UNSIGNED))
 
+META_DIR = '.ffbox/tree'
 
 class Passthrough(Operations):
     def __init__(self, root, s3_url = None):
@@ -52,22 +54,75 @@ class Passthrough(Operations):
         return f'{self.prefix}/{partial}'
 
     def cloud_getattr(self, partial):
-        # Use boto3 to get the metadata
-        response = s3_client.head_object(Bucket=self.bucket, Key=self.cloud_object_key(partial))
+        print(f'🟠 cloud getting attributes of {partial} ,', f'bucket: {self.bucket}, key: {self.cloud_object_key(partial)}')
+        key = self.cloud_object_key(partial)
         
-        # Map S3 metadata to getattr structure
-        attr_data = {
-            'st_atime': response['LastModified'].timestamp(),  # Access time
-            'st_ctime': response['LastModified'].timestamp(),  # Creation time
-            'st_mtime': response['LastModified'].timestamp(),  # Modification time
-            'st_size': response['ContentLength'],              # Size of the object
-            # 'st_mode': 0o100644,                               # File mode (non-executable)
-            'st_mode':0o100755,                               # File mode (executable)
-            'st_nlink': 1,                                     # Number of hard links
-            'st_uid': os.getuid(),                             # User ID of owner
-            'st_gid': os.getgid(),                             # Group ID of owner
-        }
-        return attr_data
+        try:
+            # First, try to get the object metadata
+            response = s3_client.head_object(Bucket=self.bucket, Key=key)
+            
+            # Map S3 metadata to getattr structure for a file
+            attr_data = {
+                'st_atime': response['LastModified'].timestamp(),  # Access time
+                'st_ctime': response['LastModified'].timestamp(),  # Creation time
+                'st_mtime': response['LastModified'].timestamp(),  # Modification time
+                'st_size': response['ContentLength'],              # Size of the object
+                # 'st_mode': 0o100644,                               # File mode (non-executable)
+                'st_mode': 0o100755,                               # File mode (executable)
+                'st_nlink': 1,                                     # Number of hard links
+                'st_uid': os.getuid(),                             # User ID of owner
+                'st_gid': os.getgid(),                             # Group ID of owner
+            }
+            return attr_data
+        except Exception as e:
+            # If the object is not found, check if it's a directory
+            print(f'🟠object not found, checking if directory {key}')
+            response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=key)
+            if 'Contents' in response or 'CommonPrefixes' in response:
+                # Return default attributes for a directory
+                return {
+                    'st_atime': 0,
+                    'st_ctime': 0,
+                    'st_mtime': 0,
+                    'st_size': 0,
+                    'st_mode': 0o040755,  # Directory mode
+                    'st_nlink': 2,
+                    'st_uid': os.getuid(),
+                    'st_gid': os.getgid(),
+                }
+            else:
+                raise FuseOSError(errno.ENOENT)
+    
+    def cloud_readdir(self, path):
+        prefix = self.cloud_object_key(path)
+        if os.path.exists(os.path.join(self.root, META_DIR, path, 'dirents.json')):
+            print(f'🔵path cache exists for {path}')
+            with open(os.path.join(self.root, META_DIR, path, 'dirents.json'), 'r') as f:
+                return json.load(f)
+        print(f'🟠reading cloud directory {prefix}')
+        # List objects in the S3 bucket with the specified prefix
+        response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=prefix, Delimiter='/')
+        print(f'🟠response: {response}')
+        
+        dirents = ['.', '..']
+        
+        # Add directories (common prefixes) to dirents
+        if 'CommonPrefixes' in response:
+            for common_prefix in response['CommonPrefixes']:
+                dir_name = common_prefix['Prefix'].rstrip('/').split('/')[-1]
+                dirents.append(dir_name)
+        
+        # Add files to dirents
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                file_name = obj['Key'].split('/')[-1]
+                dirents.append(file_name)
+        print(f'🟠dirents: {dirents}')
+        # with open(os.path.join(self.root, META_DIR, path, 'dirents.json'), 'w') as f:
+        #     json.dump(dirents, f)
+        
+        for r in dirents:
+            yield r
 
     # Filesystem methods
     # ==================
@@ -96,13 +151,15 @@ class Passthrough(Operations):
             return self.cloud_getattr(path)
 
     def readdir(self, path, fh):
-        full_path = self._full_path(path)
+        print(f'👇reading directory {path}')
+        # full_path = self._full_path(path)
 
-        dirents = ['.', '..']
-        if os.path.isdir(full_path):
-            dirents.extend(os.listdir(full_path))
-        for r in dirents:
-            yield r
+        # dirents = ['.', '..']
+        # if os.path.isdir(full_path):
+        #     dirents.extend(os.listdir(full_path))
+        # for r in dirents:
+        #     yield r
+        yield from self.cloud_readdir(path)
 
     def readlink(self, path):
         pathname = os.readlink(self._full_path(path))
