@@ -128,8 +128,11 @@ def mount_from_cloud(bucket_url, mountpoint = None):
             time.sleep(0.01) 
     return mountpoint   
 
-def run_python_project(bucket_url, extra_args):
-    mountpoint = mount_from_cloud(bucket_url)
+def run_python_project(bucket_url = None, extra_args = []):
+    if bucket_url:
+        mountpoint = mount_from_cloud(bucket_url)
+    else:
+        mountpoint = os.getcwd()
     ffbox_config_path = os.path.join(mountpoint, ".ffbox/config.json")
     if not os.path.exists(ffbox_config_path):
         print(f"🔴no ffbox config file found in {os.getcwd()}, please add ffbox/config.json first")
@@ -159,10 +162,10 @@ def background_pulling_read_order(mountpoint, num_threads=10):
         file_paths = [line.strip() for line in log_file.readlines()]
 
     def cache_file(strace_line):
-        print(f"🔵 Caching {strace_line}")
-        fileop, rel_path = strace_line.split(' ')
-        abs_path = os.path.join(mountpoint, rel_path)
+        # print(f"🔵 Caching {strace_line}")
         try:
+            fileop, rel_path = strace_line.split(' ', 1)
+            abs_path = os.path.join(mountpoint, rel_path)
             if (fileop == 'openat' or fileop == 'open') and rel_path[-1] != '/':
                 with open(abs_path, 'rb') as f:
                     f.read()  # Read the file to cache it
@@ -172,7 +175,7 @@ def background_pulling_read_order(mountpoint, num_threads=10):
                 os.stat(abs_path)
             # print(f"🔵 Cached {abs_path}")
         except Exception as e:
-            print(f"🟠 Failed to cache {abs_path}: {e}")
+            print(f"🟠 Failed to cache line {strace_line}: {e}")
             pass
 
     lock = threading.Lock()  # Create a lock object
@@ -288,7 +291,7 @@ def main():
 
     # Run command
     parser_run = subparsers.add_parser("run", help="Run a python inference project")
-    parser_run.add_argument("bucket_url", help="URL of the S3 bucket of the python project")
+    parser_run.add_argument("bucket_url", nargs='?', default=None, help="URL of the S3 bucket of the python project")
     parser_run.add_argument('extra_args', nargs=argparse.REMAINDER, help="Additional arguments for the project")
 
     args = parser.parse_args()

@@ -181,16 +181,6 @@ class Passthrough(Operations):
     def fsync(self, path, fdatasync, fh):
         return self.flush(path, fh)
 
-
-# def main(mountpoint, root):
-#     FUSE(Passthrough(root), mountpoint, nothreads=True, foreground=True)
-
-# if __name__ == '__main__':
-#     main(sys.argv[2], sys.argv[1])
-
-# mkdir -p /fake_path1 && mkdir -p /real_path1
-# python ffmount/mount.py /real_path1 /fake_path1
-
 def main(s3_url, mountpoint, prefix='/home/ec2-user/realer22', foreground=True):
     fake_path = os.path.abspath(mountpoint)
     s3_bucket_name = '/'.join(s3_url.split('://')[1:])
