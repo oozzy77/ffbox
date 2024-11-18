@@ -1,19 +1,19 @@
 #!/usr/bin/env python
 
 from __future__ import with_statement
-
-import json
 import os
 import shutil
 import subprocess
 import sys
 import errno
+import threading
 import boto3
 from botocore import UNSIGNED
 from botocore.client import Config
 from urllib.parse import urlparse
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
-import botocore
+from collections import defaultdict
+import traceback
 
 aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -25,7 +25,7 @@ else:
     # If no credentials, use unsigned configuration
     s3_client = boto3.client('s3', config=Config(signature_version=UNSIGNED))
 
-META_DIR = '.ffbox/tree'
+META_DIR = '.ffbox_noot'
 
 uid = os.getuid()
 gid = os.getgid()
@@ -37,6 +37,7 @@ class Passthrough(Operations):
         parsed_url = urlparse(s3_url)
         self.bucket = parsed_url.netloc
         self.prefix = parsed_url.path.strip('/')  # Remove both leading and trailing slashes
+        self.locks = defaultdict(threading.Lock)  # Automatically create a lock for each new file path
         print(f'init bucket: {self.bucket}')
         print(f'init prefix: {self.prefix}')
 
@@ -95,7 +96,6 @@ class Passthrough(Operations):
             return attr_data
         except Exception as e:
             # If the object is not found, check if it's a directory
-            print(f'🟠object not found, checking if directory {key}')
             response = s3_client.list_objects_v2(
                 Bucket=self.bucket,
                 Prefix=self.cloud_folder_key(path),
@@ -117,6 +117,7 @@ class Passthrough(Operations):
                     'st_gid': os.getgid(),
                 }
             else:
+                print(f'🟠 file and directory not found: {key}')
                 raise FuseOSError(errno.ENOENT)
 
     def cloud_readdir(self, path):
@@ -153,6 +154,18 @@ class Passthrough(Operations):
 
         # mark this path as completed cached
         os.makedirs(os.path.join(self.root, META_DIR, path.strip('/')), exist_ok=True)
+    
+    def download_file(self, cloud_url, full_path):
+        print(f"Running command: s5cmd cp {cloud_url} {full_path}")
+        try:
+            result = subprocess.run(['s5cmd', 'cp', cloud_url, full_path], capture_output=True, text=True, check=True)
+            if result.stdout:
+                print(f"Command output: {result.stdout}")
+            if result.stderr:
+                print(f"Command error: {result.stderr}")
+        except subprocess.CalledProcessError as e:
+            print(f"Command failed with error: {e.stderr}")
+            raise FuseOSError(errno.EIO)
 
     # Filesystem methods
     # ==================
@@ -171,6 +184,8 @@ class Passthrough(Operations):
         return os.chown(full_path, uid, gid)
 
     def getattr(self, path, fh=None):
+        if path.startswith(f'/{META_DIR}'):
+            raise FuseOSError(errno.EIO)
         print(f'👇getting attributes of {path}')
         full_path = self._full_path(path)
         if os.path.exists(full_path):
@@ -181,17 +196,17 @@ class Passthrough(Operations):
             return self.cloud_getattr(path)
 
     def readdir(self, path, fh):
+        if path.startswith(f'/{META_DIR}'):
+            raise FuseOSError(errno.EIO)
         print(f'👇reading directory {path}')
         
         cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
         if os.path.exists(cache_path):
-            full_path = self._full_path(path)
-            print(f'🟢 path cache exists for {path}')
-            dirents = ['.', '..']
-            if os.path.isdir(full_path):
-                dirents.extend(os.listdir(full_path))
-            for r in dirents:
-                yield r
+            yield '.'
+            yield '..'
+            # Add more entries as needed
+            for entry in os.listdir(self._full_path(path)):
+                yield entry
         else:
             yield from self.cloud_readdir(path)
 
@@ -240,16 +255,47 @@ class Passthrough(Operations):
     # ============
 
     def open(self, path, flags):
-        full_path = self._full_path(path)
-        print(f'👇opening file {full_path}')
-        if not os.path.exists(full_path):
-            # download from s3
-            rel_path = os.path.relpath(full_path, self.root)
-            cloud_url = f'{self.s3_url}/{rel_path}'
-            print(f'downloading {cloud_url} to {full_path}')
-            # s5cmd cp s3://bucket/object.gz .
-            subprocess.run(['s5cmd', 'cp', cloud_url, full_path])
-        return os.open(full_path, flags)
+        cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
+        print(f'👇opening file {path}')
+        
+        # Check if the file is cached without holding the lock
+        if os.path.exists(cache_path):
+            print(f'🟢 open file cache exists for {path}')
+            return os.open(self._full_path(path), flags)
+        
+        # Acquire the lock to download the file
+        with self.locks[path]:
+            # Double-check if the file was downloaded while waiting for the lock
+            if os.path.exists(cache_path):
+                print(f'🟢 open file cache exists for {path} after waiting for lock')
+                return os.open(self._full_path(path), flags)
+            
+            full_path = self._full_path(path)
+            try:
+                cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
+                print(f'🟠 cloud open file {path}, downloading {cloud_url} to {full_path}')
+                result = subprocess.run(['s5cmd', 'cp', '-sp', cloud_url, full_path], capture_output=True, text=True, check=True)
+                os.chmod(full_path, 0o755)  # Make the file executable
+                if result.stdout:
+                    print(f"Command output: {result.stdout}")
+                if result.stderr:
+                    print(f"Command error: {result.stderr}")
+                print(f'🔵 downloaded {cloud_url} to {full_path}')
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, 'wb') as f:
+                    pass  # Create marker file
+                return os.open(full_path, flags)
+            except Exception as e:
+                print(f'🔴 error downloading {cloud_url} to {full_path}: {e}')
+                traceback.print_exc()
+                # Clean up any partial downloads
+                if os.path.exists(full_path):
+                    os.unlink(full_path)
+                raise FuseOSError(errno.EIO)
+
+    def read(self, path, length, offset, fh):
+        os.lseek(fh, offset, os.SEEK_SET)
+        return os.read(fh, length)
 
     def create(self, path, mode, fi=None):
         uid, gid, pid = fuse_get_context()
@@ -257,10 +303,6 @@ class Passthrough(Operations):
         fd = os.open(full_path, os.O_WRONLY | os.O_CREAT, mode)
         os.chown(full_path,uid,gid) #chown to context uid & gid
         return fd
-
-    def read(self, path, length, offset, fh):
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.read(fh, length)
 
     def write(self, path, buf, offset, fh):
         os.lseek(fh, offset, os.SEEK_SET)
