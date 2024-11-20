@@ -66,59 +66,41 @@ class Passthrough(Operations):
         return key
 
     def cloud_getattr(self, path):
-        key = self.cloud_object_key(path)
-        print(f'🟠 cloud getting attributes of {path} ,', f'bucket: {self.bucket}, key: {key}')
-        
-        try:
-            # First, try to get the object metadata
-            response = s3_client.head_object(Bucket=self.bucket, Key=key)
-            
-            # Map S3 metadata to getattr structure for a file
-            attr_data = {
-                'st_atime': response['LastModified'].timestamp(),  # Access time
-                'st_ctime': response['LastModified'].timestamp(),  # Creation time
-                'st_mtime': response['LastModified'].timestamp(),  # Modification time
-                'st_size': response['ContentLength'],              # Size of the object
-                # 'st_mode': 0o100644,                               # File mode (non-executable)
-                'st_mode': 0o100755,                               # File mode (executable)
-                'st_nlink': 1,                                     # Number of hard links
-                'st_uid': os.getuid(),                             # User ID of owner
-                'st_gid': os.getgid(),                             # Group ID of owner
-            }
+        parent_path = os.path.dirname(path)
+        print(f'checking parent: {parent_path}')
+        if self.is_folder_cached(parent_path):
+            raise FuseOSError(errno.ENOENT)
+        print(f'🟠 cloud getting attributes of {path}', f'parent: {parent_path}')
 
+        response = s3_client.list_objects_v2(
+            Bucket=self.bucket,
+            Prefix=self.cloud_folder_key(parent_path),
+            Delimiter='/'  # This makes the operation more efficient for folders
+        )
+
+        if response.get('IsTruncated'):
+            print(f"🔴Warning: Directory listing for {path} is truncated!")
+
+        # Add directories (common prefixes) to dirents
+        parent_path = parent_path.lstrip('/')
+        for common_prefix in response.get('CommonPrefixes', []):
+            dir_name = common_prefix['Prefix'].rstrip('/').split('/')[-1]
+            os.makedirs(os.path.join(self.root, parent_path, dir_name), exist_ok=True)
+
+        # Add files to dirents
+        for obj in response.get('Contents', []):
+            file_name = obj['Key'].split('/')[-1]
             # Create an empty placeholder file with the attributes
-            file_path = os.path.join(self.root, path.strip('/'))
-            with open(file_path, 'wb') as f:
-                pass  # Create an empty file
-            os.utime(file_path, (response['LastModified'].timestamp(), response['LastModified'].timestamp()))
-            os.chmod(file_path, 0o100755)
-            os.chown(file_path, uid, gid)
-            return attr_data
-        except Exception as e:
-            # If the object is not found, check if it's a directory
-            response = s3_client.list_objects_v2(
-                Bucket=self.bucket,
-                Prefix=self.cloud_folder_key(path),
-                MaxKeys=1,  # We only need to know if there's at least one object
-                Delimiter='/'  # This makes the operation more efficient for folders
-            )
-
-            if 'Contents' in response or 'CommonPrefixes' in response:
-                # Return default attributes for a directory
-                os.makedirs(os.path.join(self.root, path.strip('/')), exist_ok=True)
-                return {
-                    'st_atime': 0,
-                    'st_ctime': 0,
-                    'st_mtime': 0,
-                    'st_size': 0,
-                    'st_mode': 0o040755,  # Directory mode
-                    'st_nlink': 2,
-                    'st_uid': os.getuid(),
-                    'st_gid': os.getgid(),
-                }
-            else:
-                print(f'🟠 file and directory not found: {key}')
-                raise FuseOSError(errno.ENOENT)
+            file_path = os.path.join(self.root, parent_path, file_name)
+            if not os.path.exists(file_path):
+                with open(file_path, 'wb') as f:
+                    pass  # Create an empty file
+                # Set file attributes
+                os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
+                os.chmod(file_path, 0o100755)  # Set file mode to executable
+                os.chown(file_path, uid, gid)  # Set ownership to current user
+        # mark this path as completed cached
+        os.makedirs(os.path.join(self.root, META_DIR, parent_path), exist_ok=True)
 
     def cloud_readdir(self, path):
         print(f'🟠reading cloud directory path: {path}')
@@ -167,10 +149,19 @@ class Passthrough(Operations):
             print(f"Command failed with error: {e.stderr}")
             raise FuseOSError(errno.EIO)
 
+    def is_folder_cached(self, path):
+        cache_path = os.path.join(self.root, META_DIR, path.lstrip('/'))
+        if os.path.exists(cache_path):
+            return True
+        else:
+            print(f'🟠 parent folder {path} is NOT cached', cache_path)
+            return False
+    
     # Filesystem methods
     # ==================
 
     def access(self, path, mode):
+        print('👇 getting access to path', path, mode)
         full_path = self._full_path(path)
         if not os.access(full_path, mode):
             raise FuseOSError(errno.EACCES)
@@ -185,15 +176,15 @@ class Passthrough(Operations):
 
     def getattr(self, path, fh=None):
         if path.startswith(f'/{META_DIR}'):
-            raise FuseOSError(errno.EIO)
-        print(f'👇getting attributes of {path}')
+            raise FuseOSError(errno.ENOENT)
+        print(f'👇getting attribute of {path}')
         full_path = self._full_path(path)
-        if os.path.exists(full_path):
-            st = os.lstat(full_path)
-            return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
-                     'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
-        else:
-            return self.cloud_getattr(path)
+        if not os.path.exists(full_path):
+            self.cloud_getattr(path)
+
+        st = os.lstat(full_path)
+        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
+                    'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
     def readdir(self, path, fh):
         if path.startswith(f'/{META_DIR}'):
@@ -211,6 +202,7 @@ class Passthrough(Operations):
             yield from self.cloud_readdir(path)
 
     def readlink(self, path):
+        print('👇 reading link', path)
         pathname = os.readlink(self._full_path(path))
         if pathname.startswith("/"):
             # Path name is absolute, sanitize it.
