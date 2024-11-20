@@ -272,17 +272,48 @@ class Passthrough(Operations):
                 # Create parent directories if they don't exist
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 
-                # Download the file using boto3
-                s3_client.download_file(
-                    self.bucket,
-                    self.cloud_object_key(path),
-                    full_path
-                )
-                print(f"Command output: Downloaded {path}")
-                # Verify file was downloaded completely
-                if not os.path.exists(full_path):
-                    raise Exception("File download failed - file does not exist")
-                    
+                # Get object details before download
+                try:
+                    obj_details = s3_client.head_object(Bucket=self.bucket, Key=self.cloud_object_key(path))
+                    expected_size = obj_details['ContentLength']
+                except Exception as e:
+                    print(f'🔴 Failed to get object details: {e}')
+                    raise FuseOSError(errno.EIO)
+
+                # Attempt download with retries
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        s3_client.download_file(
+                            self.bucket,
+                            self.cloud_object_key(path),
+                            full_path
+                        )
+                        
+                        # Verify file exists and size matches
+                        if not os.path.exists(full_path):
+                            raise Exception("File download failed - file does not exist")
+                        
+                        actual_size = os.path.getsize(full_path)
+                        if actual_size != expected_size:
+                            print(f'🔴 Size mismatch: expected {expected_size}, got {actual_size}')
+                            if attempt < max_retries - 1:
+                                print(f'Retrying download (attempt {attempt + 2}/{max_retries})')
+                                continue
+                            raise Exception(f"File size mismatch after {max_retries} attempts")
+                        
+                        print(f'🟢 Download verified: size matches ({actual_size} bytes)')
+                        break  # Success - exit retry loop
+                        
+                    except Exception as e:
+                        print(f'🔴 Download attempt {attempt + 1} failed: {e}')
+                        if os.path.exists(full_path):
+                            os.unlink(full_path)  # Clean up partial download
+                        if attempt < max_retries - 1:
+                            print(f'Retrying download (attempt {attempt + 2}/{max_retries})')
+                            continue
+                        raise  # Re-raise the last exception if all retries failed
+
                 # Set proper permissions
                 os.chmod(full_path, 0o755)  # Make the file executable
                     
