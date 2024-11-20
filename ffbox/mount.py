@@ -93,8 +93,9 @@ class Passthrough(Operations):
             # Create an empty placeholder file with the attributes
             file_path = os.path.join(self.root, parent_path, file_name)
             if not os.path.exists(file_path):
+                # Create a sparse file of the same size as the S3 object
                 with open(file_path, 'wb') as f:
-                    pass  # Create an empty file
+                    f.truncate(obj['Size'])  # Create sparse file of exact size
                 # Set file attributes
                 os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
                 os.chmod(file_path, 0o100755)  # Set file mode to executable
@@ -127,8 +128,9 @@ class Passthrough(Operations):
                 # Create an empty placeholder file with the attributes
                 file_path = os.path.join(self.root, path.lstrip('/'), file_name)
                 if not os.path.exists(file_path):
+                    # Create a sparse file of the same size as the S3 object
                     with open(file_path, 'wb') as f:
-                        pass  # Create an empty file
+                        f.truncate(obj['Size'])  # Create sparse file of exact size
                     # Set file attributes
                     os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
                     os.chmod(file_path, 0o100755)  # Set file mode to executable
@@ -266,17 +268,39 @@ class Passthrough(Operations):
             try:
                 cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
                 print(f'🟠 cloud open file {path}, downloading {cloud_url} to {full_path}')
-                result = subprocess.run(['s5cmd', 'cp', '-sp', cloud_url, full_path], capture_output=True, text=True, check=True)
+                
+                # Create parent directories if they don't exist
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                
+                # Download file with s5cmd
+                result = subprocess.run(
+                    ['s5cmd', 'cp', '--concurrency', '8', '-sp', cloud_url, full_path], 
+                    capture_output=True, 
+                    text=True, 
+                    check=True
+                )
+                
+                # Verify file was downloaded completely
+                if not os.path.exists(full_path):
+                    raise Exception("File download failed - file does not exist")
+                    
+                # Set proper permissions
                 os.chmod(full_path, 0o755)  # Make the file executable
+                
                 if result.stdout:
                     print(f"Command output: {result.stdout}")
                 if result.stderr:
                     print(f"Command error: {result.stderr}")
+                    
                 print(f'🔵 downloaded {cloud_url} to {full_path}')
+                
+                # Mark as cached
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 with open(cache_path, 'wb') as f:
                     pass  # Create marker file
+                    
                 return os.open(full_path, flags)
+                
             except Exception as e:
                 print(f'🔴 error downloading {cloud_url} to {full_path}: {e}')
                 traceback.print_exc()
@@ -284,8 +308,9 @@ class Passthrough(Operations):
                 if os.path.exists(full_path):
                     os.unlink(full_path)
                 raise FuseOSError(errno.EIO)
-
+                
     def read(self, path, length, offset, fh):
+        print('👇reading file', path)
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
 
