@@ -272,25 +272,19 @@ class Passthrough(Operations):
                 # Create parent directories if they don't exist
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
                 
-                # Download file with s5cmd
-                result = subprocess.run(
-                    ['s5cmd', 'cp', '--concurrency', '8', '-sp', cloud_url, full_path], 
-                    capture_output=True, 
-                    text=True, 
-                    check=True
+                # Download the file using boto3
+                s3_client.download_file(
+                    self.bucket,
+                    self.cloud_object_key(path),
+                    full_path
                 )
-                
+                print(f"Command output: Downloaded {path}")
                 # Verify file was downloaded completely
                 if not os.path.exists(full_path):
                     raise Exception("File download failed - file does not exist")
                     
                 # Set proper permissions
                 os.chmod(full_path, 0o755)  # Make the file executable
-                
-                if result.stdout:
-                    print(f"Command output: {result.stdout}")
-                if result.stderr:
-                    print(f"Command error: {result.stderr}")
                     
                 print(f'🔵 downloaded {cloud_url} to {full_path}')
                 
