@@ -255,7 +255,6 @@ class Passthrough(Operations):
         try:
             is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
             if is_complete == b'1':
-                print(f'🟢 open file cache is complete for {path}')
                 return os.open(self._full_path(path), flags)
         except OSError:
             # If the xattr does not exist, proceed with downloading
@@ -267,10 +266,8 @@ class Passthrough(Operations):
             try:
                 is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
                 if is_complete == b'1':
-                    print(f'🟢 open file cache is complete for {path}')
                     return os.open(self._full_path(path), flags)
             except OSError:
-                # If the xattr does not exist, proceed with downloading
                 pass
             full_path = self._full_path(path)
             try:
@@ -342,19 +339,6 @@ class Passthrough(Operations):
                 
     def read(self, path, length, offset, fh):
         print('👇reading file', path)
-        
-        # Check if the file is completely cached
-        try:
-            is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
-            print(f'🟠 read file {path} is_complete: {is_complete}')
-            if is_complete != b'1':
-                print(f'🔴 read file {path} is not completely cached')
-                raise FuseOSError(errno.EIO)
-        except OSError:
-            # If the xattr does not exist, treat it as incomplete
-            print(f'🔴 read file {path} is not completely cached')
-            raise FuseOSError(errno.EIO)
-        
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
 
