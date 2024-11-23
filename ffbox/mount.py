@@ -67,8 +67,8 @@ class Passthrough(Operations):
 
     def cloud_getattr(self, path):
         parent_path = os.path.dirname(path)
-        print(f'checking parent: {parent_path}')
-        if self.is_folder_cached(parent_path):
+        is_cached = self.is_folder_cached(parent_path)
+        if is_cached:
             raise FuseOSError(errno.ENOENT)
         print(f'🟠 cloud getting attributes of {path}', f'parent: {parent_path}')
 
@@ -101,7 +101,8 @@ class Passthrough(Operations):
                 os.chmod(file_path, 0o100755)  # Set file mode to executable
                 os.chown(file_path, uid, gid)  # Set ownership to current user
         # mark this path as completed cached
-        os.makedirs(os.path.join(self.root, META_DIR, parent_path), exist_ok=True)
+        self.mark_folder_cached(parent_path)
+
 
     def cloud_readdir(self, path):
         print(f'🟠reading cloud directory path: {path}')
@@ -137,7 +138,7 @@ class Passthrough(Operations):
                     os.chown(file_path, uid, gid)  # Set ownership to current user
 
         # mark this path as completed cached
-        os.makedirs(os.path.join(self.root, META_DIR, path.strip('/')), exist_ok=True)
+        self.mark_folder_cached(path)
     
     def download_file(self, cloud_url, full_path):
         print(f"Running command: s5cmd cp {cloud_url} {full_path}")
@@ -152,12 +153,17 @@ class Passthrough(Operations):
             raise FuseOSError(errno.EIO)
 
     def is_folder_cached(self, path):
-        cache_path = os.path.join(self.root, META_DIR, path.lstrip('/'))
-        if os.path.exists(cache_path):
-            return True
-        else:
-            print(f'🟠 parent folder {path} is NOT cached', cache_path)
+        full_path = self._full_path(path)
+        try:
+            is_complete = os.getxattr(full_path, 'user.is_complete')
+            if is_complete == b'1':
+                return True
+        except OSError:
+            # If the xattr does not exist, proceed with downloading
             return False
+
+    def mark_folder_cached(self, path):
+        os.setxattr(self._full_path(path), 'user.is_complete', b'1')
     
     # Filesystem methods
     # ==================
@@ -193,8 +199,7 @@ class Passthrough(Operations):
             raise FuseOSError(errno.EIO)
         print(f'👇reading directory {path}')
         
-        cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
-        if os.path.exists(cache_path):
+        if self.is_folder_cached(path):
             yield '.'
             yield '..'
             # Add more entries as needed
