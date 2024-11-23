@@ -13,4 +13,9 @@ setup(
     package_data={
         'ffbox': ['cp_venv_to_portable.sh'],  # Include the shell script
     },
+    install_requires=[
+        'boto3',
+        'fusepy',
+        'xattr',
+    ],
 )

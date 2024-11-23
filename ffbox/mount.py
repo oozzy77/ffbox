@@ -252,18 +252,26 @@ class Passthrough(Operations):
         cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
         print(f'👇opening file {path}')
         
-        # Check if the file is cached without holding the lock
-        if os.path.exists(cache_path):
-            print(f'🟢 open file cache exists for {path}')
-            return os.open(self._full_path(path), flags)
-        
+        try:
+            is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
+            if is_complete == b'1':
+                print(f'🟢 open file cache is complete for {path}')
+                return os.open(self._full_path(path), flags)
+        except OSError:
+            # If the xattr does not exist, proceed with downloading
+            pass
+
         # Acquire the lock to download the file
         with self.locks[path]:
             # Double-check if the file was downloaded while waiting for the lock
-            if os.path.exists(cache_path):
-                print(f'🟢 open file cache exists for {path} after waiting for lock')
-                return os.open(self._full_path(path), flags)
-            
+            try:
+                is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
+                if is_complete == b'1':
+                    print(f'🟢 open file cache is complete for {path}')
+                    return os.open(self._full_path(path), flags)
+            except OSError:
+                # If the xattr does not exist, proceed with downloading
+                pass
             full_path = self._full_path(path)
             try:
                 cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
@@ -320,9 +328,7 @@ class Passthrough(Operations):
                 print(f'🔵 downloaded {cloud_url} to {full_path}')
                 
                 # Mark as cached
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                with open(cache_path, 'wb') as f:
-                    pass  # Create marker file
+                os.setxattr(full_path, 'user.is_complete', b'1')
                     
                 return os.open(full_path, flags)
                 
@@ -336,8 +342,52 @@ class Passthrough(Operations):
                 
     def read(self, path, length, offset, fh):
         print('👇reading file', path)
+        
+        # Check if the file is completely cached
+        try:
+            is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
+            print(f'🟠 read file {path} is_complete: {is_complete}')
+            if is_complete != b'1':
+                print(f'🔴 read file {path} is not completely cached')
+                raise FuseOSError(errno.EIO)
+        except OSError:
+            # If the xattr does not exist, treat it as incomplete
+            print(f'🔴 read file {path} is not completely cached')
+            raise FuseOSError(errno.EIO)
+        
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
+
+    def read_buf(self, path, size, offset, fh):
+        print('🦄reading file buffer', path)
+        full_path = self._full_path(path)
+                # Check if the file is completely cached
+        try:
+            is_complete = os.getxattr(full_path, 'user.is_complete')
+            if is_complete != b'1':
+                print(f'🔴 read file {path} is not completely cached')
+                raise FuseOSError(errno.EIO)
+        except OSError:
+            # If the xattr does not exist, treat it as incomplete
+            print(f'🔴 read file {path} is not completely cached')
+            raise FuseOSError(errno.EIO)
+        buf = self.read(full_path, size, offset, fh)
+        return buf
+
+    def write_buf(self, path, buf, offset, fh):
+        print('🦄writing file buffer', path)
+        full_path = self._full_path(path)
+        # Check if the file is completely cached
+        try:
+            is_complete = os.getxattr(full_path, 'user.is_complete')
+            if is_complete != b'1':
+                print(f'🔴 read file {path} is not completely cached')
+                raise FuseOSError(errno.EIO)
+        except OSError:
+            # If the xattr does not exist, treat it as incomplete
+            print(f'🔴 read file {path} is not completely cached')
+            raise FuseOSError(errno.EIO)
+        return self.write(full_path, buf, offset, fh)
 
     def create(self, path, mode, fi=None):
         uid, gid, pid = fuse_get_context()
@@ -387,7 +437,7 @@ def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground
     os.makedirs(real_path, exist_ok=True)
 
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
-    FUSE(Passthrough(real_path, s3_url), fake_path, foreground=foreground)
+    FUSE(Passthrough(real_path, s3_url), fake_path, foreground=foreground, nothreads=True)
 
 def local_mount(mountpoint,  foreground=True):
     mountpoint = os.path.abspath(mountpoint)
