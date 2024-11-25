@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 from collections import defaultdict
 import traceback
+from botocore.exceptions import ClientError
 
 aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -274,14 +275,6 @@ class Passthrough(Operations):
                 
                 # Create parent directories if they don't exist
                 os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                
-                # Get object details before download
-                try:
-                    obj_details = s3_client.head_object(Bucket=self.bucket, Key=self.cloud_object_key(path))
-                    expected_size = obj_details['ContentLength']
-                except Exception as e:
-                    print(f'🔴 Failed to get object details: {e}')
-                    raise FuseOSError(errno.EIO)
 
                 # Attempt download with retries
                 max_retries = 3
@@ -293,30 +286,21 @@ class Passthrough(Operations):
                             full_path
                         )
                         
-                        # Verify file exists and size matches
-                        if not os.path.exists(full_path):
-                            raise Exception("File download failed - file does not exist")
-                        
-                        actual_size = os.path.getsize(full_path)
-                        if actual_size != expected_size:
-                            print(f'🔴 Size mismatch: expected {expected_size}, got {actual_size}')
-                            if attempt < max_retries - 1:
-                                print(f'Retrying download (attempt {attempt + 2}/{max_retries})')
-                                continue
-                            raise Exception(f"File size mismatch after {max_retries} attempts")
-                        
-                        print(f'🟢 Download verified: size matches ({actual_size} bytes)')
-                        break  # Success - exit retry loop
+                        # If download_file() completes without exception, the download was successful
+                        print(f'🟢 Download successful: {self.cloud_object_key(path)} to {full_path}')
+                        break  # Exit retry loop on success
                         
                     except Exception as e:
-                        print(f'🔴 Download attempt {attempt + 1} failed: {e}')
+                        if isinstance(e, ClientError) and e.response['Error']['Code'] == '404':
+                            print("🔴 open The object does not exist.")
+                            raise FuseOSError(errno.ENOENT)
+                        # Clean up partial download
                         if os.path.exists(full_path):
-                            os.unlink(full_path)  # Clean up partial download
+                            os.unlink(full_path)
                         if attempt < max_retries - 1:
-                            print(f'Retrying download (attempt {attempt + 2}/{max_retries})')
-                            continue
-                        raise  # Re-raise the last exception if all retries failed
-
+                            print(f'🔴Retrying download (attempt {attempt + 2}/{max_retries})')
+                        else:
+                            raise FuseOSError(errno.EIO)  # Raise error after final attempt
                 # Set proper permissions
                 os.chmod(full_path, 0o755)  # Make the file executable
                     
@@ -413,7 +397,7 @@ def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground
             return
         else:
             shutil.rmtree(fake_path)
-    if clean_cache:
+    if clean_cache and os.path.exists(real_path):
         shutil.rmtree(real_path)
     os.makedirs(fake_path, exist_ok=True)
     os.makedirs(real_path, exist_ok=True)
