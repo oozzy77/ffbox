@@ -272,10 +272,6 @@ class Passthrough(Operations):
             try:
                 cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
                 print(f'🟠 cloud open file {path}, downloading {cloud_url} to {full_path}')
-                
-                # Create parent directories if they don't exist
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-
                 # Attempt download with retries
                 max_retries = 3
                 for attempt in range(max_retries):

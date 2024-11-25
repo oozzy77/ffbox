@@ -1,5 +1,5 @@
 fusermount -uz ~/bedrock
-yes | ffbox mount "s3://ff-image-gen/pyinstaller_sdxl/" "$HOME/bedrock" --clean > "$HOME/ffbox_mount.log" 2>&1 &
+yes | ffbox mount "s3://ffbox-ea1/pyinstall_sdxl_gen/" "$HOME/bedrock" --clean > "$HOME/ffbox_mount.log" 2>&1 &
 sleep 4  # Wait for 3 seconds to ensure the mount is available
 
 start_time=$(date +%s)
