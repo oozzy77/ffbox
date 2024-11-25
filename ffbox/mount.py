@@ -156,7 +156,6 @@ class Passthrough(Operations):
         if os.path.exists(cache_path):
             return True
         else:
-            print(f'🟠 parent folder {path} is NOT cached', cache_path)
             return False
     
     # Filesystem methods
@@ -249,7 +248,6 @@ class Passthrough(Operations):
     # ============
 
     def open(self, path, flags):
-        cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
         print(f'👇opening file {path}')
         
         try:
