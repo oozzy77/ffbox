@@ -6,8 +6,9 @@ start_time=$(date +%s)
 echo "Start time: $(date)"
 
 cd ~/bedrock
-./main/main
-# strace -tt -T -e trace=file -o "$HOME/pyinstall_ffbox_bench11.log" main/main
+# ./main/main
+strace -tt -T -e trace=file -o "$HOME/pyinstall_ffbox_bench11.log" main/main
+# strace -tt -T -f -e trace=all -e signal=all -o "$HOME/pyinstall_ffbox_bench11.log" main/main
 
 end_time=$(date +%s)
 echo "End time: $(date)"

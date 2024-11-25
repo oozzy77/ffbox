@@ -181,27 +181,28 @@ class Passthrough(Operations):
             raise FuseOSError(errno.ENOENT)
         print(f'👇getting attribute of {path}')
         full_path = self._full_path(path)
-        if not os.path.exists(full_path):
-            self.cloud_getattr(path)
 
-        st = os.lstat(full_path)
-        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
-                    'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+        with self.locks[path]:
+            if not os.path.exists(full_path):
+                self.cloud_getattr(path)
+            st = os.lstat(full_path)
+            return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
+                        'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
     def readdir(self, path, fh):
         if path.startswith(f'/{META_DIR}'):
             raise FuseOSError(errno.EIO)
         print(f'👇reading directory {path}')
-        
-        cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
-        if os.path.exists(cache_path):
-            yield '.'
-            yield '..'
-            # Add more entries as needed
-            for entry in os.listdir(self._full_path(path)):
-                yield entry
-        else:
-            yield from self.cloud_readdir(path)
+        with self.locks[path]:
+            cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
+            if os.path.exists(cache_path):
+                yield '.'
+                yield '..'
+                # Add more entries as needed
+                for entry in os.listdir(self._full_path(path)):
+                    yield entry
+            else:
+                yield from self.cloud_readdir(path)
 
     def readlink(self, path):
         print('👇 reading link', path)
@@ -316,9 +317,11 @@ class Passthrough(Operations):
                 raise FuseOSError(errno.EIO)
                 
     def read(self, path, length, offset, fh):
-        print('👇reading file', path)
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.read(fh, length)
+        print(f'👇reading file {path}')
+        # Check file download status
+        with self.locks[path]:
+            os.lseek(fh, offset, os.SEEK_SET)
+            return os.read(fh, length)
 
     def read_buf(self, path, size, offset, fh):
         print('🦄reading file buffer', path)
@@ -352,29 +355,41 @@ class Passthrough(Operations):
         return self.write(full_path, buf, offset, fh)
 
     def create(self, path, mode, fi=None):
-        uid, gid, pid = fuse_get_context()
-        full_path = self._full_path(path)
-        fd = os.open(full_path, os.O_WRONLY | os.O_CREAT, mode)
-        os.chown(full_path,uid,gid) #chown to context uid & gid
-        return fd
+        print('👇 creating file')
+        with self.locks[path]:
+            uid, gid, pid = fuse_get_context()
+            full_path = self._full_path(path)
+            fd = os.open(full_path, os.O_WRONLY | os.O_CREAT, mode)
+            os.chown(full_path,uid,gid) #chown to context uid & gid
+            return fd
 
     def write(self, path, buf, offset, fh):
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.write(fh, buf)
+        print('👇 writing file')
+        with self.locks[path]:
+            os.lseek(fh, offset, os.SEEK_SET)
+            return os.write(fh, buf)
 
     def truncate(self, path, length, fh=None):
-        full_path = self._full_path(path)
-        with open(full_path, 'r+') as f:
-            f.truncate(length)
+        print('👇 truncating file')
+        with self.locks[path]:
+            full_path = self._full_path(path)
+            with open(full_path, 'r+') as f:
+                f.truncate(length)
 
     def flush(self, path, fh):
-        return os.fsync(fh)
+        print('👇 flushing file')
+        with self.locks[path]:
+            return os.fsync(fh)
 
     def release(self, path, fh):
-        return os.close(fh)
+        print('👇 releasing file')
+        with self.locks[path]:
+            return os.close(fh)
 
     def fsync(self, path, fdatasync, fh):
-        return self.flush(path, fh)
+        print('👇 fsyncing file')
+        with self.locks[path]:
+            return self.flush(path, fh)
 
 def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground=True, clean_cache=False):
     fake_path = os.path.abspath(mountpoint)
@@ -399,7 +414,7 @@ def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground
     os.makedirs(real_path, exist_ok=True)
 
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
-    FUSE(Passthrough(real_path, s3_url), fake_path, foreground=foreground, nothreads=True)
+    FUSE(Passthrough(real_path, s3_url), fake_path, foreground=foreground)
 
 def local_mount(mountpoint,  foreground=True):
     mountpoint = os.path.abspath(mountpoint)
