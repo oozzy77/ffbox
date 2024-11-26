@@ -6,7 +6,7 @@ mkdir -p $MOUNT_POINT
 
 
 yes | ffbox mount "s3://ffbox-ea1/pyinstall_sdxl_gen/" $MOUNT_POINT --clean > "$HOME/ffbox_mount.log" 2>&1 &
-sleep 4  # Wait for 3 seconds to ensure the mount is available
+sleep 3  # Wait for 3 seconds to ensure the mount is available
 
 start_time=$(date +%s)
 echo "Start time: $(date)"

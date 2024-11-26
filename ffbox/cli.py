@@ -250,6 +250,8 @@ def parse_strace_output(file_path, output_file_path, push_dir):
                 
                 # Convert absolute path to relative path with respect to push_dir
                 try:
+                    if not os.path.exists(abs_path):
+                        continue
                     rel_path = os.path.relpath(abs_path, push_dir)
                     
                     # Check if the path is inside the push_dir
