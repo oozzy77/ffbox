@@ -163,7 +163,7 @@ class Passthrough(Operations):
                 os.chmod(file_path, 0o100755)  # Set file mode to executable
                 os.chown(file_path, uid, gid)  # Set ownership to current user
         # mark this path as completed cached
-        os.makedirs(os.path.join(self.root, META_DIR, parent_path), exist_ok=True)
+        self.cache_folder(self._full_path(parent_path))
 
     def cloud_readdir(self, path):
         print(f'🟠reading cloud directory path: {path}')
@@ -199,7 +199,7 @@ class Passthrough(Operations):
                     os.chown(file_path, uid, gid)  # Set ownership to current user
 
         # mark this path as completed cached
-        os.makedirs(os.path.join(self.root, META_DIR, path.strip('/')), exist_ok=True)
+        self.cache_folder(self._full_path(path))
     
     def download_file(self, cloud_url, full_path):
         print(f"Running command: s5cmd cp {cloud_url} {full_path}")
@@ -213,12 +213,19 @@ class Passthrough(Operations):
             print(f"Command failed with error: {e.stderr}")
             raise FuseOSError(errno.EIO)
 
-    def is_folder_cached(self, path):
-        cache_path = os.path.join(self.root, META_DIR, path.lstrip('/'))
-        if os.path.exists(cache_path):
-            return True
-        else:
+    def is_folder_cached(self, fullpath):
+        # cache_path = os.path.join(self.root. META_DIR, path.strip('/'))
+        # return os.path.exists(cache_path)
+        try:
+            is_complete = os.getxattr(fullpath, 'user.is_complete')
+            if is_complete == b'1':
+                return True
+        except OSError:
             return False
+
+    def cache_folder(self, fullpath):
+        # os.makedirs(os.path.join(self.root, META_DIR, path.strip('/')), exist_ok=True)
+        os.setxattr(fullpath, 'user.is_complete', b'1')
     
     # Filesystem methods
     # ==================
@@ -238,8 +245,6 @@ class Passthrough(Operations):
         return os.chown(full_path, uid, gid)
 
     def getattr(self, path, fh=None):
-        if path.startswith(f'/{META_DIR}'):
-            raise FuseOSError(errno.ENOENT)
         print(f'👇getting attribute of {path}')
         full_path = self._full_path(path)
 
@@ -251,16 +256,14 @@ class Passthrough(Operations):
                         'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
     def readdir(self, path, fh):
-        if path.startswith(f'/{META_DIR}'):
-            raise FuseOSError(errno.EIO)
         print(f'👇reading directory {path}')
+        full_path = self._full_path(path)
         with self.locks[path]:
-            cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
-            if os.path.exists(cache_path):
+            if self.is_folder_cached(full_path):
                 yield '.'
                 yield '..'
                 # Add more entries as needed
-                for entry in os.listdir(self._full_path(path)):
+                for entry in os.listdir(full_path):
                     yield entry
             else:
                 yield from self.cloud_readdir(path)
@@ -312,11 +315,12 @@ class Passthrough(Operations):
 
     def open(self, path, flags):
         print(f'👇opening file {path}')
+        full_path = self._full_path(path)
         
         try:
-            is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
+            is_complete = os.getxattr(full_path, 'user.is_complete')
             if is_complete == b'1':
-                return os.open(self._full_path(path), flags)
+                return os.open(full_path, flags)
         except OSError:
             # If the xattr does not exist, proceed with downloading
             pass
@@ -325,12 +329,12 @@ class Passthrough(Operations):
         with self.locks[path]:
             # Double-check if the file was downloaded while waiting for the lock
             try:
-                is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
+                is_complete = os.getxattr(full_path, 'user.is_complete')
                 if is_complete == b'1':
-                    return os.open(self._full_path(path), flags)
+                    return os.open(full_path, flags)
             except OSError:
                 pass
-            full_path = self._full_path(path)
+            
             try:
                 # cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
                 print(f'🟠 cloud open file {path}, downloading to {full_path}')
