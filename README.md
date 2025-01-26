@@ -2,7 +2,7 @@
 
 Work in progress.
 
-**A better docker for deploying LLM or large AI model apps.** With our container fast streaming technology, you get instant inference, nearly 0 cold start time for your deployed LLM app.
+**A better docker for deploying LLM or large AI model apps.** With our container fast streaming technology, you get instant inference, nearly 0 cold start time for your deployed LLM app
 
 Deploy your python AI app to cloud by just pushing your code to s3, and run it with a single command.
 
