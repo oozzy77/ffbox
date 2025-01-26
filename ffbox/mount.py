@@ -32,6 +32,62 @@ META_DIR = '.ffbox_noot'
 uid = os.getuid()
 gid = os.getgid()
 
+CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
+
+# Chunked Reader Class
+class ChunkedReader:
+    def __init__(self, bucket, object_key, chunk_size, file_size, s3_client):
+        self.bucket = bucket
+        self.object_key = object_key
+        self.chunk_size = chunk_size
+        self.file_size = file_size
+        self.s3_client = s3_client
+        self.lock = threading.Lock()
+        self.buffer = {}  # Dictionary to store fetched chunks
+        self.prefetch_queue = []
+        self.prefetch_thread = threading.Thread(target=self._prefetch_chunks, daemon=True)
+        self.prefetching = False
+
+    def start_prefetching(self):
+        if not self.prefetching:
+            self.prefetching = True
+            self.prefetch_thread.start()
+
+    def stop_prefetching(self):
+        self.prefetching = False
+        self.prefetch_thread.join()
+
+    def _fetch_chunk(self, offset):
+        range_header = f"bytes={offset}-{min(offset + self.chunk_size - 1, self.file_size - 1)}"
+        response = self.s3_client.get_object(Bucket=self.bucket, Key=self.object_key, Range=range_header)
+        return response['Body'].read()
+
+    def _prefetch_chunks(self):
+        while self.prefetching:
+            if not self.prefetch_queue:
+                continue
+            with self.lock:
+                offset = self.prefetch_queue.pop(0)
+            if offset not in self.buffer:
+                try:
+                    self.buffer[offset] = self._fetch_chunk(offset)
+                except Exception as e:
+                    print(f"Prefetch error: {e}")
+
+    def read(self, offset, length):
+        chunks = []
+        start_offset = offset - (offset % self.chunk_size)
+        while length > 0:
+            if start_offset not in self.buffer:
+                self.buffer[start_offset] = self._fetch_chunk(start_offset)
+            chunk_offset = offset - start_offset
+            chunk_data = self.buffer[start_offset][chunk_offset:chunk_offset + length]
+            chunks.append(chunk_data)
+            length -= len(chunk_data)
+            offset += len(chunk_data)
+            start_offset += self.chunk_size
+        return b"".join(chunks)
+
 class Passthrough(Operations):
     def __init__(self, root, mountpoint, s3_url = None):
         self.root = root
@@ -43,6 +99,8 @@ class Passthrough(Operations):
         self.locks = defaultdict(threading.Lock)  # Automatically create a lock for each new file path
         print(f'init bucket: {self.bucket}')
         print(f'init prefix: {self.prefix}')
+        self.chunk_readers = {}
+
 
     def start_background_pulling(self):
         # Start a new thread to read from the S3 URL's read_order.log
@@ -376,13 +434,26 @@ class Passthrough(Operations):
                 if os.path.exists(full_path):
                     os.unlink(full_path)
                 raise FuseOSError(errno.EIO)
+    
+    def _get_file_size(self, object_key):
+        response = s3_client.head_object(Bucket=self.bucket, Key=object_key)
+        return response['ContentLength']
+
+    def open(self, path, flags):
+        print(f"Opening file: {path}")
+        full_path = self._full_path(path)
+        return os.open(full_path, flags)
                 
     def read(self, path, length, offset, fh):
-        print(f'👇reading file {path}')
-        # Check file download status
-        with self.locks[path]:
-            os.lseek(fh, offset, os.SEEK_SET)
-            return os.read(fh, length)
+        full_path = self._full_path(path)
+        if full_path not in self.chunk_readers:
+            object_key = self.cloud_object_key(path)
+            file_size = os.lstat(full_path).st_size
+            reader = ChunkedReader(self.bucket, object_key, CHUNK_SIZE, file_size, s3_client)
+            reader.start_prefetching()
+            self.chunk_readers[full_path] = reader
+        reader = self.chunk_readers[full_path]
+        return reader.read(offset, length)
 
     def read_buf(self, path, size, offset, fh):
         print('🦄reading file buffer', path)
@@ -476,7 +547,7 @@ def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground
 
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
     passthru = Passthrough(real_path, fake_path, s3_url)
-    passthru.start_background_pulling()
+    # passthru.start_background_pulling()
     FUSE(passthru, fake_path, foreground=foreground)
 
 def local_mount(mountpoint,  foreground=True):

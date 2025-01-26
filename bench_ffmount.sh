@@ -2,6 +2,8 @@ MOUNT_POINT=~/bedrock
 fusermount -uz $MOUNT_POINT
 rm -rf "$HOME/.cache/ffbox"
 mkdir -p "$HOME/.cache/ffbox"
+# rm -rf "/data/.cache/ffbox"
+# mkdir -p "/data/.cache/ffbox"
 mkdir -p $MOUNT_POINT
 
 
@@ -25,4 +27,4 @@ seconds=$((time_diff % 60))
 echo "Execution time: $minutes min $seconds seconds"
 
 # Unmount the bedrock directory
-fusermount -uz $MOUNT_POINT
+# fusermount -uz $MOUNT_POINT
