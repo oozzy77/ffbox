@@ -409,10 +409,20 @@ def local_mount(mountpoint,  foreground=True):
     print(f"real storage path: {fake_path}, fake storage path: {mountpoint}")
     FUSE(Passthrough(mountpoint, ''), fake_path, foreground=foreground)
 
-if __name__ == '__main__':
-    if len(sys.argv) == 2:
-        local_mount(sys.argv[1])
-    elif len(sys.argv) == 3:
-        ffmount(sys.argv[1], sys.argv[2])
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="ffbox CLI tool for S3 operations.")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # Mount command
+    parser_mount = subparsers.add_parser("mount", help="Mount an S3 bucket to a local directory")
+    parser_mount.add_argument("s3_url", help="URL of the S3 bucket")
+    parser_mount.add_argument("mountpoint", help="Local directory to mount the S3 bucket to")
+    parser_mount.add_argument("--clean", action="store_true", help="Clean the cache directory before mounting")
+
+    args = parser.parse_args()
+
+    if args.command == "mount":
+        ffmount(args.s3_url, args.mountpoint, clean_cache=args.clean)
     else:
-        print('usage: python ffbox/ffbox/mount.py [s3_url]  <mountpoint>')
+        parser.print_help()

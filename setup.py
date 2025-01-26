@@ -6,7 +6,8 @@ setup(
     packages=find_packages(),
     entry_points={
         'console_scripts': [
-            'ffbox=ffbox.cli:main',
+            # 'ffbox=ffbox.cli:main',
+            'ffbox=ffbox.mount:main',
         ],
     },
     include_package_data=True,
