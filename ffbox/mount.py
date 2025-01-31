@@ -102,7 +102,7 @@ class Passthrough(Operations):
                 os.chmod(file_path, 0o100755)  # Set file mode to executable
                 os.chown(file_path, uid, gid)  # Set ownership to current user
         # mark this path as completed cached
-        os.makedirs(os.path.join(self.root, META_DIR, parent_path), exist_ok=True)
+        self.mark_folder_cached(parent_path)
 
     def cloud_readdir(self, path):
         print(f'🟠reading cloud directory path: {path}')
@@ -138,7 +138,7 @@ class Passthrough(Operations):
                     os.chown(file_path, uid, gid)  # Set ownership to current user
 
         # mark this path as completed cached
-        os.makedirs(os.path.join(self.root, META_DIR, path.strip('/')), exist_ok=True)
+        self.mark_folder_cached(path)
     
     def download_file(self, cloud_url, full_path):
         print(f"Running command: s5cmd cp {cloud_url} {full_path}")
@@ -159,6 +159,9 @@ class Passthrough(Operations):
         else:
             return False
     
+    def mark_folder_cached(self, path):
+        os.makedirs(os.path.join(self.root, META_DIR, path.lstrip('/')), exist_ok=True)
+    
     def is_file_cached(self, path):
         try:
             is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
@@ -166,6 +169,9 @@ class Passthrough(Operations):
         except OSError:
             # If the xattr does not exist, proceed with downloading
             return False
+    
+    def mark_file_cached(self, path):
+        os.setxattr(self._full_path(path), 'user.is_complete', b'1')
 
     # Filesystem methods
     # ==================
@@ -302,7 +308,7 @@ class Passthrough(Operations):
                 print(f'🔵 downloaded {cloud_url} to {full_path}')
                 
                 # Mark as cached
-                os.setxattr(full_path, 'user.is_complete', b'1')
+                self.mark_file_cached(path)
                     
                 return os.open(full_path, flags)
                 
