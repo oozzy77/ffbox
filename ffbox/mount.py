@@ -320,36 +320,36 @@ class Passthrough(Operations):
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
 
-    def read_buf(self, path, size, offset, fh):
-        print('🦄reading file buffer', path)
-        full_path = self._full_path(path)
-                # Check if the file is completely cached
-        try:
-            is_complete = os.getxattr(full_path, 'user.is_complete')
-            if is_complete != b'1':
-                print(f'🔴 read file {path} is not completely cached')
-                raise FuseOSError(errno.EIO)
-        except OSError:
-            # If the xattr does not exist, treat it as incomplete
-            print(f'🔴 read file {path} is not completely cached')
-            raise FuseOSError(errno.EIO)
-        buf = self.read(full_path, size, offset, fh)
-        return buf
+    # def read_buf(self, path, size, offset, fh):
+    #     print('🦄reading file buffer', path)
+    #     full_path = self._full_path(path)
+    #             # Check if the file is completely cached
+    #     try:
+    #         is_complete = os.getxattr(full_path, 'user.is_complete')
+    #         if is_complete != b'1':
+    #             print(f'🔴 read file {path} is not completely cached')
+    #             raise FuseOSError(errno.EIO)
+    #     except OSError:
+    #         # If the xattr does not exist, treat it as incomplete
+    #         print(f'🔴 read file {path} is not completely cached')
+    #         raise FuseOSError(errno.EIO)
+    #     buf = self.read(full_path, size, offset, fh)
+    #     return buf
 
-    def write_buf(self, path, buf, offset, fh):
-        print('🦄writing file buffer', path)
-        full_path = self._full_path(path)
-        # Check if the file is completely cached
-        try:
-            is_complete = os.getxattr(full_path, 'user.is_complete')
-            if is_complete != b'1':
-                print(f'🔴 read file {path} is not completely cached')
-                raise FuseOSError(errno.EIO)
-        except OSError:
-            # If the xattr does not exist, treat it as incomplete
-            print(f'🔴 read file {path} is not completely cached')
-            raise FuseOSError(errno.EIO)
-        return self.write(full_path, buf, offset, fh)
+    # def write_buf(self, path, buf, offset, fh):
+    #     print('🦄writing file buffer', path)
+    #     full_path = self._full_path(path)
+    #     # Check if the file is completely cached
+    #     try:
+    #         is_complete = os.getxattr(full_path, 'user.is_complete')
+    #         if is_complete != b'1':
+    #             print(f'🔴 read file {path} is not completely cached')
+    #             raise FuseOSError(errno.EIO)
+    #     except OSError:
+    #         # If the xattr does not exist, treat it as incomplete
+    #         print(f'🔴 read file {path} is not completely cached')
+    #         raise FuseOSError(errno.EIO)
+    #     return self.write(full_path, buf, offset, fh)
 
     def create(self, path, mode, fi=None):
         uid, gid, pid = fuse_get_context()
@@ -376,8 +376,11 @@ class Passthrough(Operations):
     def fsync(self, path, fdatasync, fh):
         return self.flush(path, fh)
 
-def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground=True, clean_cache=False):
+def ffmount(s3_url, mountpoint, prefix=None, foreground=True, clean_cache=False):
     fake_path = os.path.abspath(mountpoint)
+    if prefix is None:
+        home_dir = os.path.expanduser("~")
+        prefix = os.path.join(home_dir, '.cache', 'ffbox')
     if s3_url:
         s3_bucket_name = '/'.join(s3_url.split('://')[1:])
         print(f's3 bucket name: {s3_bucket_name}')
@@ -400,14 +403,6 @@ def ffmount(s3_url, mountpoint, prefix='/home/ec2-user/.cache/ffbox', foreground
 
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
     FUSE(Passthrough(real_path, s3_url), fake_path, foreground=foreground, nothreads=True)
-
-def local_mount(mountpoint,  foreground=True):
-    mountpoint = os.path.abspath(mountpoint)
-    os.makedirs(mountpoint, exist_ok=True)
-    fake_path = mountpoint + '_realstore'
-    os.makedirs(fake_path, exist_ok=True)
-    print(f"real storage path: {fake_path}, fake storage path: {mountpoint}")
-    FUSE(Passthrough(mountpoint, ''), fake_path, foreground=foreground)
 
 def main():
     import argparse
