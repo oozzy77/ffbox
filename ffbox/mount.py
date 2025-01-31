@@ -320,37 +320,6 @@ class Passthrough(Operations):
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, length)
 
-    # def read_buf(self, path, size, offset, fh):
-    #     print('🦄reading file buffer', path)
-    #     full_path = self._full_path(path)
-    #             # Check if the file is completely cached
-    #     try:
-    #         is_complete = os.getxattr(full_path, 'user.is_complete')
-    #         if is_complete != b'1':
-    #             print(f'🔴 read file {path} is not completely cached')
-    #             raise FuseOSError(errno.EIO)
-    #     except OSError:
-    #         # If the xattr does not exist, treat it as incomplete
-    #         print(f'🔴 read file {path} is not completely cached')
-    #         raise FuseOSError(errno.EIO)
-    #     buf = self.read(full_path, size, offset, fh)
-    #     return buf
-
-    # def write_buf(self, path, buf, offset, fh):
-    #     print('🦄writing file buffer', path)
-    #     full_path = self._full_path(path)
-    #     # Check if the file is completely cached
-    #     try:
-    #         is_complete = os.getxattr(full_path, 'user.is_complete')
-    #         if is_complete != b'1':
-    #             print(f'🔴 read file {path} is not completely cached')
-    #             raise FuseOSError(errno.EIO)
-    #     except OSError:
-    #         # If the xattr does not exist, treat it as incomplete
-    #         print(f'🔴 read file {path} is not completely cached')
-    #         raise FuseOSError(errno.EIO)
-    #     return self.write(full_path, buf, offset, fh)
-
     def create(self, path, mode, fi=None):
         uid, gid, pid = fuse_get_context()
         full_path = self._full_path(path)
