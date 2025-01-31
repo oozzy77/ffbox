@@ -4,8 +4,8 @@ S3_URL="s3://ffbox-ea1/pyinstall_sdxl_gen/"
 LOG_FILE="$HOME/ffbox_mount.log"
 
 fusermount -uz $MOUNT_POINT_DIR
-yes | ffbox mount "$S3_URL" "$MOUNT_POINT_DIR" --clean > "$LOG_FILE" 2>&1 &
-# yes | ~/ffbox/mycli/ffbox_mount mount "$S3_URL" "$MOUNT_POINT_DIR" --clean > "$LOG_FILE" 2>&1 &
+# yes | ffbox mount "$S3_URL" "$MOUNT_POINT_DIR" --clean > "$LOG_FILE" 2>&1 &
+yes | ~/ffbox/mycli/ffbox_mount mount "$S3_URL" "$MOUNT_POINT_DIR" --clean > "$LOG_FILE" 2>&1 &
 sleep 4  # Wait for 3 seconds to ensure the mount is available
 
 start_time=$(date +%s)
