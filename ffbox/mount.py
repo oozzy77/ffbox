@@ -159,6 +159,14 @@ class Passthrough(Operations):
         else:
             return False
     
+    def is_file_cached(self, path):
+        try:
+            is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
+            return is_complete == b'1'
+        except OSError:
+            # If the xattr does not exist, proceed with downloading
+            return False
+
     # Filesystem methods
     # ==================
 
@@ -193,8 +201,7 @@ class Passthrough(Operations):
             raise FuseOSError(errno.EIO)
         print(f'👇reading directory {path}')
         
-        cache_path = os.path.join(self.root, META_DIR, path.strip('/'))
-        if os.path.exists(cache_path):
+        if self.is_folder_cached(path):
             yield '.'
             yield '..'
             # Add more entries as needed
@@ -251,23 +258,15 @@ class Passthrough(Operations):
     def open(self, path, flags):
         print(f'👇opening file {path}')
         
-        try:
-            is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
-            if is_complete == b'1':
-                return os.open(self._full_path(path), flags)
-        except OSError:
-            # If the xattr does not exist, proceed with downloading
-            pass
+        if self.is_file_cached(path):
+            return os.open(self._full_path(path), flags)
 
         # Acquire the lock to download the file
         with self.locks[path]:
             # Double-check if the file was downloaded while waiting for the lock
-            try:
-                is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
-                if is_complete == b'1':
-                    return os.open(self._full_path(path), flags)
-            except OSError:
-                pass
+            if self.is_file_cached(path):
+                return os.open(self._full_path(path), flags)
+                
             full_path = self._full_path(path)
             try:
                 cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
