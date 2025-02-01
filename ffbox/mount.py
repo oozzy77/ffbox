@@ -39,6 +39,7 @@ class Passthrough(Operations):
         self.bucket = parsed_url.netloc
         self.prefix = parsed_url.path.strip('/')  # Remove both leading and trailing slashes
         self.locks = defaultdict(threading.Lock)  # Automatically create a lock for each new file path
+        self.cached_dir = set()
         print(f'init bucket: {self.bucket}')
         print(f'init prefix: {self.prefix}')
 
@@ -46,9 +47,7 @@ class Passthrough(Operations):
     # =======
 
     def _full_path(self, partial):
-        if partial.startswith("/"):
-            partial = partial[1:]
-        path = os.path.join(self.root, partial)
+        path = os.path.join(self.root, partial.lstrip('/'))
         return path
 
     # Cloud s3 file operations
@@ -139,20 +138,10 @@ class Passthrough(Operations):
 
         # mark this path as completed cached
         self.mark_folder_cached(path)
-    
-    def download_file(self, cloud_url, full_path):
-        print(f"Running command: s5cmd cp {cloud_url} {full_path}")
-        try:
-            result = subprocess.run(['s5cmd', 'cp', cloud_url, full_path], capture_output=True, text=True, check=True)
-            if result.stdout:
-                print(f"Command output: {result.stdout}")
-            if result.stderr:
-                print(f"Command error: {result.stderr}")
-        except subprocess.CalledProcessError as e:
-            print(f"Command failed with error: {e.stderr}")
-            raise FuseOSError(errno.EIO)
 
     def is_folder_cached(self, path):
+        if path in self.cached_dir:
+            return True
         cache_path = os.path.join(self.root, META_DIR, path.lstrip('/'))
         if os.path.exists(cache_path):
             return True
@@ -161,8 +150,11 @@ class Passthrough(Operations):
     
     def mark_folder_cached(self, path):
         os.makedirs(os.path.join(self.root, META_DIR, path.lstrip('/')), exist_ok=True)
-    
+        self.cached_dir.add(path)
+
     def is_file_cached(self, path):
+        if path in self.cached_dir:
+            return True
         try:
             is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
             return is_complete == b'1'
@@ -172,6 +164,7 @@ class Passthrough(Operations):
     
     def mark_file_cached(self, path):
         os.setxattr(self._full_path(path), 'user.is_complete', b'1')
+        self.cached_dir.add(path)
 
     # Filesystem methods
     # ==================
