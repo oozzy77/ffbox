@@ -308,6 +308,49 @@ class Passthrough(Operations):
 
     # File methods
     # ============
+    def cloud_download(self, path, full_path):
+        try:
+            # cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
+            print(f'🟠 cloud open file {path}, downloading to {full_path}')
+            # Attempt download with retries
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    s3_client.download_file(
+                        self.bucket,
+                        self.cloud_object_key(path),
+                        full_path
+                    )
+                    # self.download_file(cloud_url, full_path)
+
+                    print(f'🟢 Download successful to {full_path}')
+                    break  # Exit retry loop on success
+                    
+                except Exception as e:
+                    if isinstance(e, ClientError) and e.response['Error']['Code'] == '404':
+                        print("🔴 open The object does not exist.")
+                        raise FuseOSError(errno.ENOENT)
+                    # Clean up partial download
+                    if os.path.exists(full_path):
+                        os.unlink(full_path)
+                    if attempt < max_retries - 1:
+                        print(f'🔴Retrying download (attempt {attempt + 2}/{max_retries})')
+                    else:
+                        raise FuseOSError(errno.EIO)  # Raise error after final attempt
+                
+            print(f'🔵 downloaded to {full_path}')
+            os.chmod(full_path, 0o755) # Make the file executable
+            
+            # Mark as cached
+            self.mark_file_cached(path)
+            
+        except Exception as e:
+            print(f'🔴 error downloading to {full_path}: {e}')
+            traceback.print_exc()
+            # Clean up any partial downloads
+            if os.path.exists(full_path):
+                os.unlink(full_path)
+            raise FuseOSError(errno.EIO)
 
     def open(self, path, flags):
         print(f'👇opening file {path}')
@@ -322,49 +365,8 @@ class Passthrough(Operations):
                 return os.open(self._full_path(path), flags)
                 
             full_path = self._full_path(path)
-            try:
-                # cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
-                print(f'🟠 cloud open file {path}, downloading to {full_path}')
-                # Attempt download with retries
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        s3_client.download_file(
-                            self.bucket,
-                            self.cloud_object_key(path),
-                            full_path
-                        )
-                        # self.download_file(cloud_url, full_path)
-
-                        print(f'🟢 Download successful to {full_path}')
-                        break  # Exit retry loop on success
-                        
-                    except Exception as e:
-                        if isinstance(e, ClientError) and e.response['Error']['Code'] == '404':
-                            print("🔴 open The object does not exist.")
-                            raise FuseOSError(errno.ENOENT)
-                        # Clean up partial download
-                        if os.path.exists(full_path):
-                            os.unlink(full_path)
-                        if attempt < max_retries - 1:
-                            print(f'🔴Retrying download (attempt {attempt + 2}/{max_retries})')
-                        else:
-                            raise FuseOSError(errno.EIO)  # Raise error after final attempt
-                    
-                print(f'🔵 downloaded to {full_path}')
-                
-                # Mark as cached
-                self.mark_file_cached(path)
-                    
-                return os.open(full_path, flags)
-                
-            except Exception as e:
-                print(f'🔴 error downloading to {full_path}: {e}')
-                traceback.print_exc()
-                # Clean up any partial downloads
-                if os.path.exists(full_path):
-                    os.unlink(full_path)
-                raise FuseOSError(errno.EIO)
+            
+            return os.open(full_path, flags)
                 
     def read(self, path, length, offset, fh):
         print(f'👇reading file {path}')
@@ -437,7 +439,7 @@ def ffmount(s3_url, mountpoint, prefix=None, foreground=True, clean_cache=False)
 
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
     passthru = Passthrough(real_path, fake_path, s3_url)
-    passthru.start_background_pulling()
+    # passthru.start_background_pulling()
     FUSE(passthru, fake_path, foreground=foreground)
 
 def main():
