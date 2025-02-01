@@ -309,71 +309,81 @@ class Passthrough(Operations):
     # File methods
     # ============
     def cloud_download(self, path, full_path):
-        try:
-            # cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
-            print(f'🟠 cloud open file {path}, downloading to {full_path}')
-            # Attempt download with retries
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    s3_client.download_file(
-                        self.bucket,
-                        self.cloud_object_key(path),
-                        full_path
-                    )
-                    # self.download_file(cloud_url, full_path)
-
-                    print(f'🟢 Download successful to {full_path}')
-                    break  # Exit retry loop on success
-                    
-                except Exception as e:
-                    if isinstance(e, ClientError) and e.response['Error']['Code'] == '404':
-                        print("🔴 open The object does not exist.")
-                        raise FuseOSError(errno.ENOENT)
-                    # Clean up partial download
-                    if os.path.exists(full_path):
-                        os.unlink(full_path)
-                    if attempt < max_retries - 1:
-                        print(f'🔴Retrying download (attempt {attempt + 2}/{max_retries})')
-                    else:
-                        raise FuseOSError(errno.EIO)  # Raise error after final attempt
+        with self.locks[path]:
+            if self.is_file_cached(path):
+                return
                 
-            print(f'🔵 downloaded to {full_path}')
-            os.chmod(full_path, 0o755) # Make the file executable
-            
-            # Mark as cached
-            self.mark_file_cached(path)
-            
-        except Exception as e:
-            print(f'🔴 error downloading to {full_path}: {e}')
-            traceback.print_exc()
-            # Clean up any partial downloads
-            if os.path.exists(full_path):
-                os.unlink(full_path)
-            raise FuseOSError(errno.EIO)
+            try:
+                # cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
+                print(f'🟠 cloud open file {path}, downloading to {full_path}')
+                # Attempt download with retries
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        s3_client.download_file(
+                            self.bucket,
+                            self.cloud_object_key(path),
+                            full_path
+                        )
+                        # self.download_file(cloud_url, full_path)
+
+                        print(f'🟢 Download successful to {full_path}')
+                        break  # Exit retry loop on success
+                        
+                    except Exception as e:
+                        if isinstance(e, ClientError) and e.response['Error']['Code'] == '404':
+                            print("🔴 open The object does not exist.")
+                            raise FuseOSError(errno.ENOENT)
+                        # Clean up partial download
+                        if os.path.exists(full_path):
+                            os.unlink(full_path)
+                        if attempt < max_retries - 1:
+                            print(f'🔴Retrying download (attempt {attempt + 2}/{max_retries})')
+                        else:
+                            raise FuseOSError(errno.EIO)  # Raise error after final attempt
+                    
+                print(f'🔵 downloaded to {full_path}')
+                # TODO: remove this once we can maintain the file attibutes when downloading (now it just replaces the sparse placeholder file and wipes the existing attributes)
+                os.chmod(full_path, 0o755) # Make the file executable
+                
+                # Mark as cached
+                self.mark_file_cached(path)
+                
+            except Exception as e:
+                # TODO: add error handling on download fail (maybe reflect on task status to notify consumer)
+                print(f'🔴 error downloading to {full_path}: {e}')
+                traceback.print_exc()
+                # Clean up any partial downloads
+                if os.path.exists(full_path):
+                    os.unlink(full_path)
+                raise FuseOSError(errno.EIO)
 
     def open(self, path, flags):
         print(f'👇opening file {path}')
+        full_path = self._full_path(path)
+        # threading.Thread(target=self.cloud_download, args=(path, full_path), daemon=True).start()
         
-        if self.is_file_cached(path):
-            return os.open(self._full_path(path), flags)
-
-        # Acquire the lock to download the file
-        with self.locks[path]:
-            # Double-check if the file was downloaded while waiting for the lock
-            if self.is_file_cached(path):
-                return os.open(self._full_path(path), flags)
-                
-            full_path = self._full_path(path)
-            
-            return os.open(full_path, flags)
+        return os.open(full_path, flags)
                 
     def read(self, path, length, offset, fh):
         print(f'👇reading file {path}')
         # Check file download status
-        with self.locks[path]:
+        if self.is_file_cached(path):
             os.lseek(fh, offset, os.SEEK_SET)
             return os.read(fh, length)
+        else:
+            # make range request to s3
+            try:
+                response = s3_client.get_object(
+                    Bucket=self.bucket,
+                    Key=self.cloud_object_key(path),
+                    Range=f'bytes={offset}-{offset+length-1}'
+                )
+                return response['Body'].read()
+            except Exception as e:
+                print(f'🔴 error fetching file range from s3 {path}: {e}')
+                traceback.print_exc()
+                raise FuseOSError(errno.EIO)
 
     def create(self, path, mode, fi=None):
         print('👇 creating file')
