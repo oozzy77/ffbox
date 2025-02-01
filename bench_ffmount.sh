@@ -12,6 +12,7 @@ start_time=$(date +%s)
 echo "Start time: $(date)"
 
 cd "$MOUNT_POINT_DIR"
+chmod +x ./main/main
 ./main/main
 # strace -tt -T -e trace=file -o "$HOME/pyinstall_ffbox_bench11.log" main/main
 

@@ -98,8 +98,6 @@ class Passthrough(Operations):
                     f.truncate(obj['Size'])  # Create sparse file of exact size
                 # Set file attributes
                 os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
-                os.chmod(file_path, 0o100755)  # Set file mode to executable
-                os.chown(file_path, uid, gid)  # Set ownership to current user
         # mark this path as completed cached
         self.mark_folder_cached(parent_path)
 
@@ -133,8 +131,6 @@ class Passthrough(Operations):
                         f.truncate(obj['Size'])  # Create sparse file of exact size
                     # Set file attributes
                     os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
-                    os.chmod(file_path, 0o100755)  # Set file mode to executable
-                    os.chown(file_path, uid, gid)  # Set ownership to current user
 
         # mark this path as completed cached
         self.mark_folder_cached(path)
@@ -168,7 +164,6 @@ class Passthrough(Operations):
     # ==================
 
     def access(self, path, mode):
-        print('👇 getting access to path', path, mode)
         full_path = self._full_path(path)
         if not os.access(full_path, mode):
             raise FuseOSError(errno.EACCES)
