@@ -16,6 +16,7 @@ from collections import defaultdict
 import traceback
 from botocore.exceptions import ClientError
 from queue import Queue
+import concurrent.futures
 
 aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -308,47 +309,75 @@ class Passthrough(Operations):
 
     # File methods
     # ============
+    CHUNK_SIZE = 5 * 1024 * 1024  # 5MB
+    MAX_THREAD = 100
+
     def cloud_download(self, path, full_path):
         with self.locks[path]:
             if self.is_file_cached(path):
                 return
-                
-            try:
-                # cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
-                print(f'🟠 cloud open file {path}, downloading to {full_path}')
-                # Attempt download with retries
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        s3_client.download_file(
-                            self.bucket,
-                            self.cloud_object_key(path),
-                            full_path
-                        )
-                        # self.download_file(cloud_url, full_path)
 
-                        print(f'🟢 Download successful to {full_path}')
-                        break  # Exit retry loop on success
-                        
-                    except Exception as e:
-                        if isinstance(e, ClientError) and e.response['Error']['Code'] == '404':
-                            print("🔴 open The object does not exist.")
-                            raise FuseOSError(errno.ENOENT)
-                        # Clean up partial download
-                        if os.path.exists(full_path):
-                            os.unlink(full_path)
-                        if attempt < max_retries - 1:
-                            print(f'🔴Retrying download (attempt {attempt + 2}/{max_retries})')
-                        else:
-                            raise FuseOSError(errno.EIO)  # Raise error after final attempt
-                    
-                print(f'🔵 downloaded to {full_path}')
-                # TODO: remove this once we can maintain the file attibutes when downloading (now it just replaces the sparse placeholder file and wipes the existing attributes)
-                os.chmod(full_path, 0o755) # Make the file executable
-                
-                # Mark as cached
+            try:
+                print(f'🟠 cloud open file {path}, parallel downloading to {full_path}')
+
+                object_size = os.stat(full_path).st_size
+
+                def download_chunk(start_offset, end_offset, attempt=0):
+                    max_retries = 3
+                    for attempt_i in range(max_retries):
+                        try:
+                            response = s3_client.get_object(
+                                Bucket=self.bucket,
+                                Key=self.cloud_object_key(path),
+                                Range=f'bytes={start_offset}-{end_offset}'
+                            )
+                            chunk_data = response['Body'].read()
+                            
+                            # write chunk into file at the correct offset
+                            with open(full_path, 'r+b') as f:
+                                f.seek(start_offset)
+                                f.write(chunk_data)
+                            return
+
+                        except ClientError as e2:
+                            # If 404 or other errors
+                            if e2.response['Error']['Code'] == '404':
+                                print("🔴 open The object does not exist.")
+                                raise FuseOSError(errno.ENOENT)
+
+                            if attempt_i < max_retries - 1:
+                                print(f'🔴Retrying chunk download (attempt {attempt_i + 2}/{max_retries}) for bytes {start_offset}-{end_offset}')
+                            else:
+                                raise FuseOSError(errno.EIO)
+                        except Exception as e3:
+                            print(f'🔴 error fetching file range {start_offset}-{end_offset} from s3 {path}: {e3}')
+                            traceback.print_exc()
+                            if attempt_i < max_retries - 1:
+                                print(f'🔴Retrying chunk download (attempt {attempt_i + 2}/{max_retries}) for bytes {start_offset}-{end_offset}')
+                            else:
+                                raise FuseOSError(errno.EIO)
+
+                chunk_size = self.CHUNK_SIZE
+                ranges = []
+                start = 0
+                while start < object_size:
+                    end = min(start + chunk_size - 1, object_size - 1)
+                    ranges.append((start, end))
+                    start += chunk_size
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=self.MAX_THREAD) as executor:
+                    future_to_range = {
+                        executor.submit(download_chunk, rng[0], rng[1]): rng
+                        for rng in ranges
+                    }
+                    for future in concurrent.futures.as_completed(future_to_range):
+                        future.result()
+
+                print(f'🟢 Parallel download successful to {full_path}')
+                # os.chmod(full_path, 0o755)
+
                 self.mark_file_cached(path)
-                
+
             except Exception as e:
                 # TODO: add error handling on download fail (maybe reflect on task status to notify consumer)
                 print(f'🔴 error downloading to {full_path}: {e}')
@@ -361,7 +390,7 @@ class Passthrough(Operations):
     def open(self, path, flags):
         print(f'👇opening file {path}')
         full_path = self._full_path(path)
-        # threading.Thread(target=self.cloud_download, args=(path, full_path), daemon=True).start()
+        threading.Thread(target=self.cloud_download, args=(path, full_path), daemon=True).start()
         
         return os.open(full_path, flags)
                 
@@ -373,6 +402,7 @@ class Passthrough(Operations):
             return os.read(fh, length)
         else:
             # make range request to s3
+            print('🟠 cloud range request, downloading to {full_path}')
             try:
                 response = s3_client.get_object(
                     Bucket=self.bucket,
