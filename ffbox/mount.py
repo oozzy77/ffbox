@@ -243,9 +243,10 @@ class Passthrough(Operations):
     def getattr(self, path, fh=None):
         print(f'👇getting attribute of {path}')
         full_path = self._full_path(path)
-        if not os.path.exists(full_path):
-            self.cloud_getattr(path)
+
         with self.locks[path]:
+            if not os.path.exists(full_path):
+                self.cloud_getattr(path)
             st = os.lstat(full_path)
             return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
                         'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
