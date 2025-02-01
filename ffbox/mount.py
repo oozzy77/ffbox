@@ -15,6 +15,7 @@ from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 from collections import defaultdict
 import traceback
 from botocore.exceptions import ClientError
+from queue import Queue
 
 aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -32,8 +33,9 @@ uid = os.getuid()
 gid = os.getgid()
 
 class Passthrough(Operations):
-    def __init__(self, root, s3_url = None):
+    def __init__(self, root, mountpoint, s3_url = None):
         self.root = root
+        self.mountpoint = mountpoint
         self.s3_url = s3_url
         parsed_url = urlparse(s3_url)
         self.bucket = parsed_url.netloc
@@ -42,6 +44,65 @@ class Passthrough(Operations):
         self.cached_dir = set()
         print(f'init bucket: {self.bucket}')
         print(f'init prefix: {self.prefix}')
+
+    def start_background_pulling(self):
+        # Start a new thread to read from the S3 URL's read_order.log
+        threading.Thread(target=self.read_log_and_spawn_threads, daemon=True).start()
+
+    def read_log_and_spawn_threads(self):
+        # Download the log file from the S3 URL
+        log_key = f"{self.prefix}/.ffbox/read_order.log"
+        try:
+            response = s3_client.get_object(Bucket=self.bucket, Key=log_key)
+            log_content = response['Body'].read().decode('utf-8')
+            log_lines = log_content.splitlines()
+            print(f'🦄 bg thread finished reading log file')
+            # Create a queue and populate it with log lines
+            task_queue = Queue()
+            for line in log_lines:
+                task_queue.put(line)
+            print(f'🦄 bg thread finished populating queue')
+            # Function for threads to consume tasks from the queue
+            def worker():
+                while not task_queue.empty():
+                    line = task_queue.get()
+                    try:
+                        self.handle_file_operation(line)
+                    except Exception as e:
+                        print(f'🦄🟠 bg thread error handling file operation: {e}')
+                    # finally:
+                    #     task_queue.task_done()
+
+            # Spawn 200 threads
+            threads = []
+            for _ in range(200):
+                thread = threading.Thread(target=worker, daemon=True)
+                thread.start()
+                threads.append(thread)
+
+            # Wait for all tasks to be completed
+            # task_queue.join()
+
+        except self.s3_client.exceptions.NoSuchKey:
+            print(f"Log file {log_key} does not exist in bucket {self.bucket}.")
+        except Exception as e:
+            print(f"Error downloading log file: {e}")
+
+    def handle_file_operation(self, log_entry):
+        # Parse the log entry and perform the corresponding file operation
+        if log_entry.startswith("openat"):
+            rel_path = log_entry.split(" ")[1]
+            abs_path = os.path.join(self.mountpoint, rel_path)
+            print(f'🦄 bg thread opening file {abs_path}')
+            os.open(abs_path,  os.O_RDONLY)
+            # self.open(f'/{rel_path}',  os.O_RDONLY)
+        elif log_entry.startswith("newfstatat") or log_entry.startswith("stat") or log_entry.startswith("lsstat"):
+            rel_path = log_entry.split(" ")[1]
+            abs_path = os.path.join(self.mountpoint, rel_path)
+            print(f'🦄 bg thread getting attributes of {abs_path}')
+            os.lstat(abs_path)
+            # print(f'🦄 bg thread getting attributes of {rel_path}')
+            # self.getattr(f'/{rel_path}')
 
     # Helpers
     # =======
@@ -136,6 +197,8 @@ class Passthrough(Operations):
         self.mark_folder_cached(path)
 
     def is_folder_cached(self, path):
+        if path in self.cached_dir:
+            return True
         try:
             is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
             return is_complete == b'1'
@@ -145,6 +208,7 @@ class Passthrough(Operations):
     
     def mark_folder_cached(self, path):
         os.setxattr(self._full_path(path), 'user.is_complete', b'1')
+        self.cached_dir.add(path)
     
     def is_file_cached(self, path):
         if path in self.cached_dir:
@@ -179,12 +243,13 @@ class Passthrough(Operations):
     def getattr(self, path, fh=None):
         print(f'👇getting attribute of {path}')
         full_path = self._full_path(path)
-        if not os.path.exists(full_path):
-            self.cloud_getattr(path)
 
-        st = os.lstat(full_path)
-        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
-                    'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+        with self.locks[path]:
+            if not os.path.exists(full_path):
+                self.cloud_getattr(path)
+            st = os.lstat(full_path)
+            return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
+                        'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
     def readdir(self, path, fh):
         print(f'👇reading directory {path}')
@@ -196,7 +261,8 @@ class Passthrough(Operations):
             for entry in os.listdir(self._full_path(path)):
                 yield entry
         else:
-            yield from self.cloud_readdir(path)
+            with self.locks[path]:
+                yield from self.cloud_readdir(path)
 
     def readlink(self, path):
         print('👇 reading link', path)
@@ -257,8 +323,8 @@ class Passthrough(Operations):
                 
             full_path = self._full_path(path)
             try:
-                cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
-                print(f'🟠 cloud open file {path}, downloading {cloud_url} to {full_path}')
+                # cloud_url = f's3://{self.bucket}/{self.cloud_object_key(path)}'
+                print(f'🟠 cloud open file {path}, downloading to {full_path}')
                 # Attempt download with retries
                 max_retries = 3
                 for attempt in range(max_retries):
@@ -268,9 +334,9 @@ class Passthrough(Operations):
                             self.cloud_object_key(path),
                             full_path
                         )
-                        
-                        # If download_file() completes without exception, the download was successful
-                        print(f'🟢 Download successful: {self.cloud_object_key(path)} to {full_path}')
+                        # self.download_file(cloud_url, full_path)
+
+                        print(f'🟢 Download successful to {full_path}')
                         break  # Exit retry loop on success
                         
                     except Exception as e:
@@ -287,7 +353,7 @@ class Passthrough(Operations):
                 # Set proper permissions
                 os.chmod(full_path, 0o755)  # Make the file executable
                     
-                print(f'🔵 downloaded {cloud_url} to {full_path}')
+                print(f'🔵 downloaded to {full_path}')
                 
                 # Mark as cached
                 self.mark_file_cached(path)
@@ -295,7 +361,7 @@ class Passthrough(Operations):
                 return os.open(full_path, flags)
                 
             except Exception as e:
-                print(f'🔴 error downloading {cloud_url} to {full_path}: {e}')
+                print(f'🔴 error downloading to {full_path}: {e}')
                 traceback.print_exc()
                 # Clean up any partial downloads
                 if os.path.exists(full_path):
@@ -303,34 +369,48 @@ class Passthrough(Operations):
                 raise FuseOSError(errno.EIO)
                 
     def read(self, path, length, offset, fh):
-        print('👇reading file', path)
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.read(fh, length)
+        print(f'👇reading file {path}')
+        # Check file download status
+        with self.locks[path]:
+            os.lseek(fh, offset, os.SEEK_SET)
+            return os.read(fh, length)
 
     def create(self, path, mode, fi=None):
-        uid, gid, pid = fuse_get_context()
-        full_path = self._full_path(path)
-        fd = os.open(full_path, os.O_WRONLY | os.O_CREAT, mode)
-        os.chown(full_path,uid,gid) #chown to context uid & gid
-        return fd
+        print('👇 creating file')
+        with self.locks[path]:
+            uid, gid, pid = fuse_get_context()
+            full_path = self._full_path(path)
+            fd = os.open(full_path, os.O_WRONLY | os.O_CREAT, mode)
+            os.chown(full_path,uid,gid) #chown to context uid & gid
+            return fd
 
     def write(self, path, buf, offset, fh):
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.write(fh, buf)
+        print('👇 writing file')
+        with self.locks[path]:
+            os.lseek(fh, offset, os.SEEK_SET)
+            return os.write(fh, buf)
 
     def truncate(self, path, length, fh=None):
-        full_path = self._full_path(path)
-        with open(full_path, 'r+') as f:
-            f.truncate(length)
+        print('👇 truncating file')
+        with self.locks[path]:
+            full_path = self._full_path(path)
+            with open(full_path, 'r+') as f:
+                f.truncate(length)
 
     def flush(self, path, fh):
-        return os.fsync(fh)
+        print('👇 flushing file')
+        with self.locks[path]:
+            return os.fsync(fh)
 
     def release(self, path, fh):
-        return os.close(fh)
+        print('👇 releasing file')
+        with self.locks[path]:
+            return os.close(fh)
 
     def fsync(self, path, fdatasync, fh):
-        return self.flush(path, fh)
+        print('👇 fsyncing file')
+        with self.locks[path]:
+            return self.flush(path, fh)
 
 def ffmount(s3_url, mountpoint, prefix=None, foreground=True, clean_cache=False):
     fake_path = os.path.abspath(mountpoint)
@@ -358,7 +438,9 @@ def ffmount(s3_url, mountpoint, prefix=None, foreground=True, clean_cache=False)
     os.makedirs(real_path, exist_ok=True)
 
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
-    FUSE(Passthrough(real_path, s3_url), fake_path, foreground=foreground, nothreads=True)
+    passthru = Passthrough(real_path, fake_path, s3_url)
+    passthru.start_background_pulling()
+    FUSE(passthru, fake_path, foreground=foreground)
 
 def main():
     import argparse
