@@ -98,8 +98,6 @@ class Passthrough(Operations):
                     f.truncate(obj['Size'])  # Create sparse file of exact size
                 # Set file attributes
                 os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
-                os.chmod(file_path, 0o100755)  # Set file mode to executable
-                os.chown(file_path, uid, gid)  # Set ownership to current user
         # mark this path as completed cached
         self.mark_folder_cached(parent_path)
 
@@ -133,25 +131,21 @@ class Passthrough(Operations):
                         f.truncate(obj['Size'])  # Create sparse file of exact size
                     # Set file attributes
                     os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
-                    os.chmod(file_path, 0o100755)  # Set file mode to executable
-                    os.chown(file_path, uid, gid)  # Set ownership to current user
 
         # mark this path as completed cached
         self.mark_folder_cached(path)
 
     def is_folder_cached(self, path):
-        if path in self.cached_dir:
-            return True
-        cache_path = os.path.join(self.root, META_DIR, path.lstrip('/'))
-        if os.path.exists(cache_path):
-            return True
-        else:
+        try:
+            is_complete = os.getxattr(self._full_path(path), 'user.is_complete')
+            return is_complete == b'1'
+        except OSError:
+            # If the xattr does not exist, proceed with downloading
             return False
     
     def mark_folder_cached(self, path):
-        os.makedirs(os.path.join(self.root, META_DIR, path.lstrip('/')), exist_ok=True)
-        self.cached_dir.add(path)
-
+        os.setxattr(self._full_path(path), 'user.is_complete', b'1')
+    
     def is_file_cached(self, path):
         if path in self.cached_dir:
             return True
@@ -170,7 +164,6 @@ class Passthrough(Operations):
     # ==================
 
     def access(self, path, mode):
-        print('👇 getting access to path', path, mode)
         full_path = self._full_path(path)
         if not os.access(full_path, mode):
             raise FuseOSError(errno.EACCES)
@@ -184,8 +177,6 @@ class Passthrough(Operations):
         return os.chown(full_path, uid, gid)
 
     def getattr(self, path, fh=None):
-        if path.startswith(f'/{META_DIR}'):
-            raise FuseOSError(errno.ENOENT)
         print(f'👇getting attribute of {path}')
         full_path = self._full_path(path)
         if not os.path.exists(full_path):
@@ -196,8 +187,6 @@ class Passthrough(Operations):
                     'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
     def readdir(self, path, fh):
-        if path.startswith(f'/{META_DIR}'):
-            raise FuseOSError(errno.EIO)
         print(f'👇reading directory {path}')
         
         if self.is_folder_cached(path):
