@@ -310,7 +310,7 @@ class Passthrough(Operations):
     # File methods
     # ============
     CHUNK_SIZE = 5 * 1024 * 1024  # 5MB
-    MAX_THREAD = 100
+    MAX_THREAD = 20
 
     def cloud_download(self, path, full_path):
         with self.locks[path]:
@@ -398,8 +398,9 @@ class Passthrough(Operations):
         print(f'👇reading file {path}')
         # Check file download status
         if self.is_file_cached(path):
-            os.lseek(fh, offset, os.SEEK_SET)
-            return os.read(fh, length)
+            with open(self._full_path(path), "rb") as f:
+                f.seek(offset)
+                return f.read(length)
         else:
             # make range request to s3
             print('🟠 cloud range request, downloading to {full_path}')
