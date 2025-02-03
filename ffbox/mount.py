@@ -43,6 +43,7 @@ class Passthrough(Operations):
         self.prefix = parsed_url.path.strip('/')  # Remove both leading and trailing slashes
         self.locks = defaultdict(threading.Lock)  # Automatically create a lock for each new file path
         self.cached_dir = set()
+        self.fd_cache = set()  # track whether a file descriptor is fully cached
         print(f'init bucket: {self.bucket}')
         print(f'init prefix: {self.prefix}')
 
@@ -338,17 +339,6 @@ class Passthrough(Operations):
                                 f.seek(start_offset)
                                 f.write(chunk_data)
                             return
-
-                        except ClientError as e2:
-                            # If 404 or other errors
-                            if e2.response['Error']['Code'] == '404':
-                                print("🔴 open The object does not exist.")
-                                raise FuseOSError(errno.ENOENT)
-
-                            if attempt_i < max_retries - 1:
-                                print(f'🔴Retrying chunk download (attempt {attempt_i + 2}/{max_retries}) for bytes {start_offset}-{end_offset}')
-                            else:
-                                raise FuseOSError(errno.EIO)
                         except Exception as e3:
                             print(f'🔴 error fetching file range {start_offset}-{end_offset} from s3 {path}: {e3}')
                             traceback.print_exc()
@@ -390,17 +380,20 @@ class Passthrough(Operations):
     def open(self, path, flags):
         print(f'👇opening file {path}')
         full_path = self._full_path(path)
-        threading.Thread(target=self.cloud_download, args=(path, full_path), daemon=True).start()
+        fd = os.open(full_path, flags)
+        if self.is_file_cached(path):
+            self.fd_cache.add(fd)
+        else:
+            threading.Thread(target=self.cloud_download, args=(path, full_path), daemon=True).start()
         
-        return os.open(full_path, flags)
+        return fd
                 
     def read(self, path, length, offset, fh):
         print(f'👇reading file {path}')
         # Check file download status
-        if self.is_file_cached(path):
-            with open(self._full_path(path), "rb") as f:
-                f.seek(offset)
-                return f.read(length)
+        if fh in self.fd_cache:
+            os.lseek(fh, offset, os.SEEK_SET)
+            return os.read(fh, length)
         else:
             # make range request to s3
             print('🟠 cloud range request, downloading to {full_path}')
@@ -445,8 +438,8 @@ class Passthrough(Operations):
 
     def release(self, path, fh):
         print('👇 releasing file')
-        with self.locks[path]:
-            return os.close(fh)
+        self.fd_cache.discard(fh)
+        return os.close(fh)
 
     def fsync(self, path, fdatasync, fh):
         print('👇 fsyncing file')
