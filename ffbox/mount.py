@@ -33,7 +33,154 @@ META_DIR = '.ffbox_noot'
 uid = os.getuid()
 gid = os.getgid()
 
+import os
+import math
+import mmap
+import threading
+import concurrent.futures
+from botocore.exceptions import ClientError
+
+class MmapChunkedReader:
+    """
+    Downloads an S3 object in parallel chunks and writes them directly 
+    into a memory-mapped local file. Provides a `read(offset, length)` 
+    method that blocks until the needed chunks are downloaded.
+    """
+
+    def __init__(self, s3_client, bucket, key, local_path, 
+                 file_size, chunk_size=5*1024*1024, max_workers=10):
+        """
+        :param s3_client: Boto3 S3 client
+        :param bucket: S3 bucket name
+        :param key: Key (path) of the file in S3
+        :param local_path: Full path to local file (already truncated to file_size)
+        :param file_size: Size of the file in bytes
+        :param chunk_size: Chunk size in bytes for each parallel range-get
+        :param max_workers: Maximum number of download threads
+        """
+        self.s3_client = s3_client
+        self.bucket = bucket
+        self.key = key
+        self.local_path = local_path
+        self.file_size = file_size
+        self.chunk_size = chunk_size
+        self.max_workers = max_workers
+
+        # Calculate how many chunks needed
+        self.num_chunks = math.ceil(file_size / chunk_size) if file_size > 0 else 0
+
+        # Track which chunks have been downloaded
+        self.chunk_downloaded = [False] * self.num_chunks
+        # For concurrency
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+
+        # Memory-map the local file in read/write mode
+        self._file_obj = open(self.local_path, 'r+b')
+        self._mmap = mmap.mmap(self._file_obj.fileno(), self.file_size, access=mmap.ACCESS_WRITE)
+
+        # Flag to track if entire file is cached
+        self.is_fully_cached = (self.num_chunks == 0)  # true if file_size==0
+
+        # Start background download thread
+        self._downloader_thread = threading.Thread(target=self._download_all_chunks, daemon=True)
+        self._downloader_thread.start()
+
+    def _download_all_chunks(self):
+        """ Spin up a thread pool to fetch all chunks in parallel. """
+        if self.num_chunks == 0:
+            # Edge case: zero-length file
+            with self._lock:
+                self.is_fully_cached = True
+                self._cond.notify_all()
+            return
+
+        def download_chunk(idx):
+            start_offset = idx * self.chunk_size
+            end_offset = min(start_offset + self.chunk_size - 1, self.file_size - 1)
+            range_header = f'bytes={start_offset}-{end_offset}'
+
+            # Basic retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    resp = self.s3_client.get_object(
+                        Bucket=self.bucket,
+                        Key=self.key,
+                        Range=range_header
+                    )
+                    data = resp['Body'].read()
+                    # Write data directly into the mapped file
+                    self._mmap.seek(start_offset)
+                    self._mmap.write(data)
+                    break  # success
+                except ClientError as e:
+                    if attempt == max_retries - 1:
+                        raise
+                except Exception as e2:
+                    if attempt == max_retries - 1:
+                        raise
+            
+            with self._lock:
+                self.chunk_downloaded[idx] = True
+                self._cond.notify_all()
+
+        # Download chunks in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [executor.submit(download_chunk, i) for i in range(self.num_chunks)]
+            for f in concurrent.futures.as_completed(futures):
+                # Raise any exception
+                _ = f.result()
+
+        # Mark fully cached
+        with self._lock:
+            self.is_fully_cached = True
+            self._cond.notify_all()
+
+    def read(self, offset, length):
+        """
+        If the file is fully cached, read directly from the mmap.
+        Otherwise, block until each needed chunk is downloaded.
+        """
+        if offset >= self.file_size:
+            return b""
+
+        if offset + length > self.file_size:
+            length = self.file_size - offset
+
+        # If fully cached, just read
+        with self._lock:
+            if self.is_fully_cached:
+                self._mmap.seek(offset)
+                return self._mmap.read(length)
+
+        # Otherwise, figure out which chunks we need
+        first_chunk = offset // self.chunk_size
+        last_chunk  = (offset + length - 1) // self.chunk_size
+
+        # Wait for chunks
+        with self._lock:
+            for cidx in range(first_chunk, last_chunk + 1):
+                while not self.chunk_downloaded[cidx]:
+                    self._cond.wait()
+        
+        # Now read from mmap
+        self._mmap.seek(offset)
+        return self._mmap.read(length)
+
+    def close(self):
+        """
+        Clean up. Call this when you know you're done with the file, e.g. in FUSE release().
+        """
+        if not self._mmap.closed:
+            self._mmap.close()
+        if not self._file_obj.closed:
+            self._file_obj.close()
+
+
 class Passthrough(Operations):
+    CHUNK_SIZE = 5 * 1024 * 1024  # 5MB
+    MAX_WORKERS = 10
     def __init__(self, root, mountpoint, s3_url = None):
         self.root = root
         self.mountpoint = mountpoint
@@ -43,6 +190,8 @@ class Passthrough(Operations):
         self.prefix = parsed_url.path.strip('/')  # Remove both leading and trailing slashes
         self.locks = defaultdict(threading.Lock)  # Automatically create a lock for each new file path
         self.cached_dir = set()
+        self.chunk_readers = {}     # path -> MmapChunkedReader
+
         print(f'init bucket: {self.bucket}')
         print(f'init prefix: {self.prefix}')
 
@@ -388,33 +537,65 @@ class Passthrough(Operations):
                 raise FuseOSError(errno.EIO)
 
     def open(self, path, flags):
-        print(f'👇opening file {path}')
         full_path = self._full_path(path)
-        threading.Thread(target=self.cloud_download, args=(path, full_path), daemon=True).start()
-        
-        return os.open(full_path, flags)
-                
-    def read(self, path, length, offset, fh):
-        print(f'👇reading file {path}')
-        # Check file download status
+        print(f"👀 open() called for {path}")
+
+        # If file is fully cached, do a normal open
         if self.is_file_cached(path):
-            with open(self._full_path(path), "rb") as f:
+            return os.open(full_path, flags)
+        else:
+            # Otherwise, create or retrieve an MmapChunkedReader
+            with self.locks[path]:
+                if path not in self.chunk_readers:
+                    # We know the local file is created/truncated to the correct size 
+                    # (you do that in your "cloud_getattr" or "cloud_readdir" logic).
+                    file_size = os.stat(full_path).st_size
+                    reader = MmapChunkedReader(
+                        s3_client=s3_client,
+                        bucket=self.bucket,
+                        key=self.cloud_object_key(path),
+                        local_path=full_path,
+                        file_size=file_size,
+                        chunk_size=self.CHUNK_SIZE,
+                        max_workers=self.MAX_WORKERS
+                    )
+                    self.chunk_readers[path] = reader
+            return os.open(full_path, flags)
+
+    def read(self, path, length, offset, fh):
+        # If the file is fully cached, read from local disk. Otherwise, delegate to MmapChunkedReader.
+        print(f"👀 read() called for {path} offset={offset}, length={length}")
+
+        # Otherwise, we have an MmapChunkedReader
+        reader = self.chunk_readers.get(path)
+        if reader:
+            data = reader.read(offset, length)
+            # If the reader says it's fully cached, mark the file as cached
+            if reader.is_fully_cached:
+                self.mark_file_cached(path)
+            return data
+        # TODO: remove this check, since we already checked in open()
+        if self.is_file_cached(path):
+            print(f'🟠 file {path} is fully cached, reading from local disk')
+            # Normal local file read
+            with open(self._full_path(path), 'rb') as f:
                 f.seek(offset)
                 return f.read(length)
-        else:
-            # make range request to s3
-            print('🟠 cloud range request, downloading to {full_path}')
-            try:
-                response = s3_client.get_object(
-                    Bucket=self.bucket,
-                    Key=self.cloud_object_key(path),
-                    Range=f'bytes={offset}-{offset+length-1}'
-                )
-                return response['Body'].read()
-            except Exception as e:
-                print(f'🔴 error fetching file range from s3 {path}: {e}')
-                traceback.print_exc()
-                raise FuseOSError(errno.EIO)
+        else: # this should never happen, since we already checked in open()
+            print(f'🔴 file {path} is not fully cached in disk, and not being downloading!!')
+            raise FuseOSError(errno.ENOENT)
+
+    # ...
+    # Optionally, in your release() or close() logic, you might do:
+    def release(self, path, fh):
+        print(f'👀 release() called for {path}')
+        # If you want to close the MmapChunkedReader after the last close
+        # you'd need a reference count or similar. For simplicity:
+        reader = self.chunk_readers.get(path)
+        if reader and reader.is_fully_cached:
+            reader.close()
+            del self.chunk_readers[path]
+        return os.close(fh)
 
     def create(self, path, mode, fi=None):
         print('👇 creating file')
@@ -442,11 +623,6 @@ class Passthrough(Operations):
         print('👇 flushing file')
         with self.locks[path]:
             return os.fsync(fh)
-
-    def release(self, path, fh):
-        print('👇 releasing file')
-        with self.locks[path]:
-            return os.close(fh)
 
     def fsync(self, path, fdatasync, fh):
         print('👇 fsyncing file')
