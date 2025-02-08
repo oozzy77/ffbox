@@ -142,6 +142,64 @@ func (n *PassthroughNode) Rename(ctx context.Context, oldName string, newParent 
 	return 0
 }
 
+// Create is called when a new file is created (e.g., "open with O_CREAT").
+func (n *PassthroughNode) Create(
+	ctx context.Context,
+	name string,
+	flags uint32,
+	mode uint32,
+) (
+	node *fs.Inode,
+	fh fs.FileHandle,
+	fuseFlags uint32,
+	errno syscall.Errno,
+) {
+	// Construct the underlying (real) path for the new file.
+	fullPath := filepath.Join(n.rootPath, name)
+
+	// Open the file on the real filesystem with O_CREAT
+	// Combine the flags from FUSE with the O_CREATE bit.
+	f, err := os.OpenFile(fullPath, int(flags)|os.O_CREATE, os.FileMode(mode))
+	if err != nil {
+		return nil, nil, 0, fs.ToErrno(err)
+	}
+
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, 0, fs.ToErrno(err)
+	}
+
+	// Create a child node referencing the newly created file.
+	child := &PassthroughNode{
+		rootPath: fullPath,
+	}
+
+	// Attach that child node to the FS tree.
+	inode := n.NewInode(
+		ctx,
+		child,
+		fs.StableAttr{
+			Ino:  uint64(st.Sys().(*syscall.Stat_t).Ino),
+			Mode: uint32(st.Mode()),
+		},
+	)
+
+	// Return the new inode, the file handle, and no special fuseFlags or error.
+	return inode, f, 0, 0
+}
+
+// Write writes data to the file at the given offset.
+func (n *PassthroughNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	// If you're simply passing through to an os.File, you can do this:
+	osFile := f.(*os.File)
+	nBytes, err := osFile.WriteAt(data, off)
+	if err != nil {
+		return 0, fs.ToErrno(err)
+	}
+	return uint32(nBytes), 0
+}
+
 func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <targetDir> <mountPoint>\n", os.Args[0])
