@@ -1,237 +1,140 @@
+// Copyright 2016 the Go-FUSE Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// This is main program driver for the loopback filesystem from
+// github.com/hanwen/go-fuse/fs/, a filesystem that shunts operations
+// to an underlying file system.
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
+	"os/signal"
+	"path"
+	"runtime/pprof"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// PassthroughNode is our "loopback" node that forwards operations to the real filesystem.
-type PassthroughNode struct {
-	fs.Inode
-	rootPath string
-}
+func writeMemProfile(fn string, sigs <-chan os.Signal) {
+	i := 0
+	for range sigs {
+		fn := fmt.Sprintf("%s-%d.memprof", fn, i)
+		i++
 
-// This will be called when the filesystem looks up an entry.
-// We return a child node that references the underlying path on the real filesystem.
-func (n *PassthroughNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	realPath := filepath.Join(n.rootPath, name)
-	st, err := os.Lstat(realPath)
-	if err != nil {
-		return nil, fs.ToErrno(err)
+		log.Printf("Writing mem profile to %s\n", fn)
+		f, err := os.Create(fn)
+		if err != nil {
+			log.Printf("Create: %v", err)
+			continue
+		}
+		pprof.WriteHeapProfile(f)
+		if err := f.Close(); err != nil {
+			log.Printf("close %v", err)
+		}
 	}
-
-	// Create a new child node.
-	child := &PassthroughNode{
-		rootPath: realPath,
-	}
-
-	// Embed child node within the parent.
-	return n.NewInode(
-		ctx,
-		child,
-		fs.StableAttr{
-			Mode: uint32(st.Mode()),
-			Ino:  uint64(st.Sys().(*syscall.Stat_t).Ino),
-		},
-	), 0
-}
-
-// Readdir is used to list directory contents.
-func (n *PassthroughNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	dir, err := os.Open(n.rootPath)
-	if err != nil {
-		return nil, fs.ToErrno(err)
-	}
-	defer dir.Close()
-
-	entries, err := dir.Readdir(-1)
-	if err != nil {
-		return nil, fs.ToErrno(err)
-	}
-	ds := make([]fuse.DirEntry, 0, len(entries))
-	for _, e := range entries {
-		st := e.Sys().(*syscall.Stat_t)
-		ds = append(ds, fuse.DirEntry{
-			Mode: uint32(e.Mode()),
-			Ino:  st.Ino,
-			Name: e.Name(),
-		})
-	}
-	return fs.NewListDirStream(ds), 0
-}
-
-// Getattr is used to retrieve file/directory attributes.
-func (n *PassthroughNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	fi, err := os.Lstat(n.rootPath)
-	if err != nil {
-		return fs.ToErrno(err)
-	}
-	st := fi.Sys().(*syscall.Stat_t)
-	out.FromStat(st)
-	return 0
-}
-
-// Open opens the file for read/write. We'll use the built-in FileHandle.
-func (n *PassthroughNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	f, err := os.OpenFile(n.rootPath, int(flags), 0)
-	if err != nil {
-		return nil, 0, fs.ToErrno(err)
-	}
-	return f, fuse.FOPEN_KEEP_CACHE, 0
-}
-
-// Mkdir creates a new directory.
-func (n *PassthroughNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	newPath := filepath.Join(n.rootPath, name)
-	err := os.Mkdir(newPath, os.FileMode(mode))
-	if err != nil {
-		return nil, fs.ToErrno(err)
-	}
-
-	st, err := os.Lstat(newPath)
-	if err != nil {
-		return nil, fs.ToErrno(err)
-	}
-	child := &PassthroughNode{
-		rootPath: newPath,
-	}
-	return n.NewInode(
-		ctx,
-		child,
-		fs.StableAttr{
-			Mode: uint32(st.Mode()),
-			Ino:  uint64(st.Sys().(*syscall.Stat_t).Ino),
-		},
-	), 0
-}
-
-// Unlink removes a file.
-func (n *PassthroughNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	fullPath := filepath.Join(n.rootPath, name)
-	if err := os.Remove(fullPath); err != nil {
-		return fs.ToErrno(err)
-	}
-	return 0
-}
-
-// Rmdir removes a directory.
-func (n *PassthroughNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	fullPath := filepath.Join(n.rootPath, name)
-	if err := os.Remove(fullPath); err != nil {
-		return fs.ToErrno(err)
-	}
-	return 0
-}
-
-// Rename renames (moves) a file or directory.
-func (n *PassthroughNode) Rename(ctx context.Context, oldName string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	oldPath := filepath.Join(n.rootPath, oldName)
-	newParentNode := newParent.(*PassthroughNode)
-	newPath := filepath.Join(newParentNode.rootPath, newName)
-	if err := os.Rename(oldPath, newPath); err != nil {
-		return fs.ToErrno(err)
-	}
-	return 0
-}
-
-// Create is called when a new file is created (e.g., "open with O_CREAT").
-func (n *PassthroughNode) Create(
-	ctx context.Context,
-	name string,
-	flags uint32,
-	mode uint32,
-) (
-	node *fs.Inode,
-	fh fs.FileHandle,
-	fuseFlags uint32,
-	errno syscall.Errno,
-) {
-	// Construct the underlying (real) path for the new file.
-	fullPath := filepath.Join(n.rootPath, name)
-
-	// Open the file on the real filesystem with O_CREAT
-	// Combine the flags from FUSE with the O_CREATE bit.
-	f, err := os.OpenFile(fullPath, int(flags)|os.O_CREATE, os.FileMode(mode))
-	if err != nil {
-		return nil, nil, 0, fs.ToErrno(err)
-	}
-
-	st, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, nil, 0, fs.ToErrno(err)
-	}
-
-	// Create a child node referencing the newly created file.
-	child := &PassthroughNode{
-		rootPath: fullPath,
-	}
-
-	// Attach that child node to the FS tree.
-	inode := n.NewInode(
-		ctx,
-		child,
-		fs.StableAttr{
-			Ino:  uint64(st.Sys().(*syscall.Stat_t).Ino),
-			Mode: uint32(st.Mode()),
-		},
-	)
-
-	// Return the new inode, the file handle, and no special fuseFlags or error.
-	return inode, f, 0, 0
-}
-
-// Write writes data to the file at the given offset.
-func (n *PassthroughNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (written uint32, errno syscall.Errno) {
-	// If you're simply passing through to an os.File, you can do this:
-	osFile := f.(*os.File)
-	nBytes, err := osFile.WriteAt(data, off)
-	if err != nil {
-		return 0, fs.ToErrno(err)
-	}
-	return uint32(nBytes), 0
 }
 
 func main() {
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s <targetDir> <mountPoint>\n", os.Args[0])
-		flag.PrintDefaults()
-	}
+	log.SetFlags(log.Lmicroseconds)
+	// Scans the arg list and sets up flags
+	debug := flag.Bool("debug", false, "print debugging messages.")
+	other := flag.Bool("allow-other", false, "mount with -o allowother.")
+
+	quiet := flag.Bool("q", false, "quiet")
+	ro := flag.Bool("ro", false, "mount read-only")
+	directmount := flag.Bool("directmount", false, "try to call the mount syscall instead of executing fusermount")
+	directmountstrict := flag.Bool("directmountstrict", false, "like directmount, but don't fall back to fusermount")
+	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to this file")
+	memprofile := flag.String("memprofile", "", "write memory profile to this file")
 	flag.Parse()
-
 	if flag.NArg() < 2 {
-		flag.Usage()
-		os.Exit(1)
+		fmt.Printf("usage: %s MOUNTPOINT ORIGINAL\n", path.Base(os.Args[0]))
+		fmt.Printf("\noptions:\n")
+		flag.PrintDefaults()
+		os.Exit(2)
+	}
+	if *cpuprofile != "" {
+		if !*quiet {
+			fmt.Printf("Writing cpu profile to %s\n", *cpuprofile)
+		}
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(3)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+	if *memprofile != "" {
+		if !*quiet {
+			log.Printf("send SIGUSR1 to %d to dump memory profile", os.Getpid())
+		}
+		profSig := make(chan os.Signal, 1)
+		signal.Notify(profSig, syscall.SIGUSR1)
+		go writeMemProfile(*memprofile, profSig)
+	}
+	if *cpuprofile != "" || *memprofile != "" {
+		if !*quiet {
+			fmt.Printf("Note: You must unmount gracefully, otherwise the profile file(s) will stay empty!\n")
+		}
 	}
 
-	targetDir := flag.Arg(0)
-	mountPoint := flag.Arg(1)
-
-	// Construct a new file system root node.
-	root := &PassthroughNode{
-		rootPath: targetDir,
-	}
-
-	// Create a go-fuse filesystem by mounting the root node.
-	opts := &fs.Options{}
-	opts.Debug = false // Set to true to enable debugging logs.
-
-	server, err := fs.Mount(mountPoint, root, opts)
+	orig := flag.Arg(1)
+	loopbackRoot, err := fs.NewLoopbackRoot(orig)
 	if err != nil {
-		log.Fatalf("Mount failed: %v\n", err)
-		return
+		log.Fatalf("NewLoopbackRoot(%s): %v\n", orig, err)
 	}
 
-	fmt.Printf("Passthrough FS mounted on %s, forwarding to %s\n", mountPoint, targetDir)
+	sec := time.Second
+	opts := &fs.Options{
+		// The timeout options are to be compatible with libfuse defaults,
+		// making benchmarking easier.
+		AttrTimeout:  &sec,
+		EntryTimeout: &sec,
 
-	// Run the FUSE server in the foreground until unmounted.
+		NullPermissions: true, // Leave file permissions on "000" files as-is
+
+		MountOptions: fuse.MountOptions{
+			AllowOther:        *other,
+			Debug:             *debug,
+			DirectMount:       *directmount,
+			DirectMountStrict: *directmountstrict,
+			FsName:            orig,       // First column in "df -T": original dir
+			Name:              "loopback", // Second column in "df -T" will be shown as "fuse." + Name
+		},
+	}
+	if opts.AllowOther {
+		// Make the kernel check file permissions for us
+		opts.MountOptions.Options = append(opts.MountOptions.Options, "default_permissions")
+	}
+	if *ro {
+		opts.MountOptions.Options = append(opts.MountOptions.Options, "ro")
+	}
+	// Enable diagnostics logging
+	if !*quiet {
+		opts.Logger = log.New(os.Stderr, "", 0)
+	}
+	server, err := fs.Mount(flag.Arg(0), loopbackRoot, opts)
+	if err != nil {
+		log.Fatalf("Mount fail: %v\n", err)
+	}
+	if !*quiet {
+		fmt.Println("Mounted!")
+	}
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		server.Unmount()
+	}()
+
 	server.Wait()
 }
