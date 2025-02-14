@@ -34,7 +34,7 @@ write_test() {
         local tempfile="${directory}/writetest_$$_${i}.tmp"
         local start=$(date +%s%N)
         # Write 1 MB (1048576 bytes) from /dev/urandom.
-        head -c 1048576 </dev/urandom > "$tempfile"
+        head -c 104857600 </dev/urandom > "$tempfile"
         local end=$(date +%s%N)
         local diff=$(( end - start ))
         total_time_ns=$(( total_time_ns + diff ))
@@ -50,7 +50,7 @@ read_test() {
     local directory="$1"
     local iterations="$2"
     local tempfile="${directory}/readtest_$$.tmp"
-    head -c 1048576 </dev/urandom > "$tempfile"
+    head -c 104857600 </dev/urandom > "$tempfile"
     local total_time_ns=0
 
     for i in $(seq 1 "$iterations"); do
