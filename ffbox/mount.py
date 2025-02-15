@@ -22,10 +22,12 @@ aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
 
 if aws_access_key and aws_secret_key:
     # If credentials are found, use them
-    s3_client = boto3.client('s3')
+    config = Config(max_pool_connections=50)
+    s3_client = boto3.client('s3', config=config)
 else:
     # If no credentials, use unsigned configuration
-    s3_client = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+    config = Config(signature_version=UNSIGNED, max_pool_connections=50)
+    s3_client = boto3.client('s3', config=config)
 
 META_DIR = '.ffbox_noot'
 

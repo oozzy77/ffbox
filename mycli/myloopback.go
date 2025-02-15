@@ -7,10 +7,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	. "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
@@ -21,6 +26,10 @@ import (
 // FfboxNodeRoot holds the parameters for creating a new loopback
 // filesystem. Loopback filesystem delegate their operations to an
 // underlying POSIX file system.
+var s3Client *s3.Client
+var bucketName string
+var rootPath string
+
 type FfboxNodeRoot struct {
 	// The path to the root of the underlying file system.
 	Path string
@@ -77,6 +86,7 @@ type FfboxNode struct {
 
 	// RootData points back to the root of the loopback filesystem.
 	RootData *FfboxNodeRoot
+	isComplete bool
 }
 
 // loopbackNodeEmbedder can only be implemented by the FfboxNode
@@ -121,12 +131,139 @@ func (n *FfboxNode) path() string {
 
 var _ = (NodeLookuper)((*FfboxNode)(nil))
 
+func cloudFolderKey(path string) string {
+	path = strings.TrimLeft(path, "/")
+	if !strings.HasSuffix(path, "/") {
+		path = path + "/"
+	}
+	return path
+}
+
+// isFolderCached checks whether the folder is already marked as cached.
+func (n *FfboxNode) isFolderCached(path string) bool {
+	if n.isComplete {
+		return true
+	}
+	// Allocate a small buffer. "1" is only one byte so a 2 byte buffer is plenty.
+	buf := make([]byte, 2)
+	nread, err := unix.Lgetxattr(path, "user.is_complete", buf)
+	if err != nil {
+		// The attribute is probably not set.
+		return false
+	}
+
+	// Compare the value. You can compare as a string...
+	return string(buf[:nread]) == "1"
+}
+
+// markFolderCached marks a folder as cached.
+func (n *FfboxNode) markFolderCached(path string) {
+	n.isComplete = true
+	err := unix.Lsetxattr(path, "user.is_complete", []byte("1"), 0)
+	if err != nil {
+		fmt.Printf("🔴Error setting xattr: %v\n", err)
+	}
+}
+
+// Updated cloudLookup implements cloud_getattr‑like behavior using AWS SDK v2.
+// It is meant to be called (for example from a Lookup handler) when a file or folder
+// under a “cloud” path is requested.
+func cloudLookup(ctx context.Context, n *FfboxNode, name string, out *fuse.EntryOut) bool {
+	parentPath := filepath.Dir(name)
+	fmt.Printf("Checking parent: %s\n", parentPath)
+	if n.isFolderCached(parentPath) {
+		return false
+	}
+	fmt.Printf("🟠 Cloud getting attributes of %s, parent: %s\n", name, parentPath)
+
+	// Build the S3 prefix using our helper.
+	prefix := cloudFolderKey(parentPath)
+	input := &s3.ListObjectsV2Input{
+		Bucket:    aws.String(bucketName),
+		Prefix:    aws.String(prefix),
+		Delimiter: aws.String("/"), // This limits the listing to the folder level.
+	}
+
+	// Call S3 to list objects.
+	resp, err := s3Client.ListObjectsV2(ctx, input)
+	if err != nil {
+		fmt.Printf("Error listing S3 objects: %v\n", err)
+		return false
+	}
+
+	// if resp.IsTruncated {
+	// 	fmt.Printf("🔴Warning: Directory listing for %s is truncated!\n", name)
+	// }
+
+	// Compute the local path for the parent folder.
+	localParent := strings.TrimLeft(parentPath, "/")
+
+	// Process common prefixes to create missing local subdirectories.
+	for _, cp := range resp.CommonPrefixes {
+		if cp.Prefix == nil {
+			continue
+		}
+		// Remove the trailing slash and get the last part as directory name.
+		cpStr := strings.TrimRight(*cp.Prefix, "/")
+		parts := strings.Split(cpStr, "/")
+		dirName := parts[len(parts)-1]
+		localDirPath := filepath.Join(rootPath, localParent, dirName)
+		if err := os.MkdirAll(localDirPath, 0755); err != nil {
+			fmt.Printf("Error creating directory %s: %v\n", localDirPath, err)
+		}
+	}
+
+	// Process files (S3 objects) to create sparse placeholder files if they do not exist.
+	for _, obj := range resp.Contents {
+		if obj.Key == nil {
+			continue
+		}
+		key := *obj.Key
+		parts := strings.Split(key, "/")
+		fileName := parts[len(parts)-1]
+		localFilePath := filepath.Join(rootPath, localParent, fileName)
+		if _, err := os.Stat(localFilePath); os.IsNotExist(err) {
+			// Create the file (it will be sparse if we simply truncate to the given size).
+			f, err := os.OpenFile(localFilePath, os.O_RDWR|os.O_CREATE, 0644)
+			if err != nil {
+				fmt.Printf("Error creating file %s: %v\n", localFilePath, err)
+				continue
+			}
+			// Truncate the file to the size of the S3 object.
+			if err := f.Truncate(*obj.Size); err != nil {
+				fmt.Printf("Error truncating file %s: %v\n", localFilePath, err)
+			}
+			f.Close()
+
+			// If available, use LastModified to update the file times.
+			if obj.LastModified != nil {
+				modTime := *obj.LastModified
+				if err := os.Chtimes(localFilePath, modTime, modTime); err != nil {
+					fmt.Printf("Error setting times on file %s: %v\n", localFilePath, err)
+				}
+			}
+		}
+	}
+
+	// Mark this folder as cached so we don’t repeat S3 lookups.
+	n.markFolderCached(parentPath)
+
+	return true
+}
+
 func (n *FfboxNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*Inode, syscall.Errno) {
 	p := filepath.Join(n.path(), name)
 	fmt.Println("Lookup22222", p)
 	st := syscall.Stat_t{}
 	err := syscall.Lstat(p, &st)
 	if err != nil {
+		if cloudLookup(ctx, n, name, out) {
+			err = syscall.Lstat(p, &st)
+			out.Attr.FromStat(&st)
+			node := n.RootData.newNode(n.EmbeddedInode(), name, &st)
+			ch := n.NewInode(ctx, node, n.RootData.idFromStat(&st))
+			return ch, 0
+		}
 		return nil, ToErrno(err)
 	}
 
@@ -537,17 +674,27 @@ func (n *FfboxNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 // NewFfboxNodeRoot returns a root node for a loopback file system whose
 // root is at the given root. This node implements all NodeXxxxer
 // operations available.
-func NewFfboxNodeRoot(rootPath string) (InodeEmbedder, error) {
+func NewFfboxNodeRoot(cachePath string, s3Bucket string) (InodeEmbedder, error) {
 	var st syscall.Stat_t
-	err := syscall.Stat(rootPath, &st)
+	rootPath = cachePath
+	err := syscall.Stat(cachePath, &st)
 	if err != nil {
 		return nil, err
 	}
 
 	root := &FfboxNodeRoot{
-		Path: rootPath,
+		Path: cachePath,
 		Dev:  uint64(st.Dev),
 	}
+
+	// Create a new AWS session.
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1")) // Change to your region
+	if err != nil {
+		log.Fatalf("unable to load SDK config, %v", err)
+	}
+	// Create an S3 client
+	s3Client = s3.NewFromConfig(cfg)
+	bucketName = s3Bucket
 
 	rootNode := root.newNode(nil, "", &st)
 	root.RootNode = rootNode

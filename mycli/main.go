@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"runtime/pprof"
 	"syscall"
 	"time"
@@ -85,11 +86,12 @@ func main() {
 			fmt.Printf("Note: You must unmount gracefully, otherwise the profile file(s) will stay empty!\n")
 		}
 	}
-
-	orig := flag.Arg(1)
-	loopbackRoot, err := NewFfboxNodeRoot(orig)
+	
+	s3Bucket := flag.Arg(1)
+	cacheDir := filepath.Join(os.Getenv("HOME"), ".cache", "ffbox", s3Bucket)
+	loopbackRoot, err := NewFfboxNodeRoot(cacheDir, s3Bucket)
 	if err != nil {
-		log.Fatalf("NewLoopbackRoot(%s): %v\n", orig, err)
+		log.Fatalf("NewLoopbackRoot(%s): %v\n", cacheDir, err)
 	}
 
 	sec := time.Second
@@ -106,7 +108,7 @@ func main() {
 			Debug:             *debug,
 			DirectMount:       *directmount,
 			DirectMountStrict: *directmountstrict,
-			FsName:            orig,       // First column in "df -T": original dir
+			FsName:            cacheDir,       // First column in "df -T": original dir
 			Name:              "loopback", // Second column in "df -T" will be shown as "fuse." + Name
 		},
 	}
