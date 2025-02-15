@@ -60,7 +60,7 @@ class MmapChunkedReader:
         self.key = key
         self.local_path = local_path
         self.file_size = file_size
-        self.chunk_size = 128*1024 #5MB
+        self.chunk_size = 5*1024*1024 #5MB
         self.max_workers = 20
 
         # Calculate how many chunks needed
@@ -569,7 +569,7 @@ def ffmount(s3_url, mountpoint, prefix=None, foreground=True, clean_cache=False)
 
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
     passthru = Passthrough(real_path, fake_path, s3_url)
-    # passthru.start_background_pulling()
+    passthru.start_background_pulling()
     FUSE(passthru, fake_path, foreground=foreground)
 
 def main():
