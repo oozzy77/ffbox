@@ -87,7 +87,7 @@ func main() {
 	}
 
 	orig := flag.Arg(1)
-	loopbackRoot, err := NewFfboxRoot(orig)
+	loopbackRoot, err := NewFfboxNodeRoot(orig)
 	if err != nil {
 		log.Fatalf("NewLoopbackRoot(%s): %v\n", orig, err)
 	}
