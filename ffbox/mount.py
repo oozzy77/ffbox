@@ -47,27 +47,24 @@ class MmapChunkedReader:
     method that blocks until the needed chunks are downloaded.
     """
 
-    def __init__(self, s3_client, bucket, key, local_path, 
-                 file_size, chunk_size=5*1024*1024, max_workers=10):
+    def __init__(self, s3_client, bucket, key, local_path, file_size):
         """
         :param s3_client: Boto3 S3 client
         :param bucket: S3 bucket name
         :param key: Key (path) of the file in S3
         :param local_path: Full path to local file (already truncated to file_size)
         :param file_size: Size of the file in bytes
-        :param chunk_size: Chunk size in bytes for each parallel range-get
-        :param max_workers: Maximum number of download threads
         """
         self.s3_client = s3_client
         self.bucket = bucket
         self.key = key
         self.local_path = local_path
         self.file_size = file_size
-        self.chunk_size = chunk_size
-        self.max_workers = max_workers
+        self.chunk_size = 128*1024 #5MB
+        self.max_workers = 20
 
         # Calculate how many chunks needed
-        self.num_chunks = math.ceil(file_size / chunk_size) if file_size > 0 else 0
+        self.num_chunks = math.ceil(file_size / self.chunk_size) if file_size > 0 else 0
 
         # Track which chunks have been downloaded
         self.chunk_downloaded = [False] * self.num_chunks
@@ -458,83 +455,6 @@ class Passthrough(Operations):
 
     # File methods
     # ============
-    CHUNK_SIZE = 5 * 1024 * 1024  # 5MB
-    MAX_THREAD = 20
-
-    def cloud_download(self, path, full_path):
-        with self.locks[path]:
-            if self.is_file_cached(path):
-                return
-
-            try:
-                print(f'🟠 cloud open file {path}, parallel downloading to {full_path}')
-
-                object_size = os.stat(full_path).st_size
-
-                def download_chunk(start_offset, end_offset, attempt=0):
-                    max_retries = 3
-                    for attempt_i in range(max_retries):
-                        try:
-                            response = s3_client.get_object(
-                                Bucket=self.bucket,
-                                Key=self.cloud_object_key(path),
-                                Range=f'bytes={start_offset}-{end_offset}'
-                            )
-                            chunk_data = response['Body'].read()
-                            
-                            # write chunk into file at the correct offset
-                            with open(full_path, 'r+b') as f:
-                                f.seek(start_offset)
-                                f.write(chunk_data)
-                            return
-
-                        except ClientError as e2:
-                            # If 404 or other errors
-                            if e2.response['Error']['Code'] == '404':
-                                print("🔴 open The object does not exist.")
-                                raise FuseOSError(errno.ENOENT)
-
-                            if attempt_i < max_retries - 1:
-                                print(f'🔴Retrying chunk download (attempt {attempt_i + 2}/{max_retries}) for bytes {start_offset}-{end_offset}')
-                            else:
-                                raise FuseOSError(errno.EIO)
-                        except Exception as e3:
-                            print(f'🔴 error fetching file range {start_offset}-{end_offset} from s3 {path}: {e3}')
-                            traceback.print_exc()
-                            if attempt_i < max_retries - 1:
-                                print(f'🔴Retrying chunk download (attempt {attempt_i + 2}/{max_retries}) for bytes {start_offset}-{end_offset}')
-                            else:
-                                raise FuseOSError(errno.EIO)
-
-                chunk_size = self.CHUNK_SIZE
-                ranges = []
-                start = 0
-                while start < object_size:
-                    end = min(start + chunk_size - 1, object_size - 1)
-                    ranges.append((start, end))
-                    start += chunk_size
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=self.MAX_THREAD) as executor:
-                    future_to_range = {
-                        executor.submit(download_chunk, rng[0], rng[1]): rng
-                        for rng in ranges
-                    }
-                    for future in concurrent.futures.as_completed(future_to_range):
-                        future.result()
-
-                print(f'🟢 Parallel download successful to {full_path}')
-                # os.chmod(full_path, 0o755)
-
-                self.mark_file_cached(path)
-
-            except Exception as e:
-                # TODO: add error handling on download fail (maybe reflect on task status to notify consumer)
-                print(f'🔴 error downloading to {full_path}: {e}')
-                traceback.print_exc()
-                # Clean up any partial downloads
-                if os.path.exists(full_path):
-                    os.unlink(full_path)
-                raise FuseOSError(errno.EIO)
 
     def open(self, path, flags):
         full_path = self._full_path(path)
@@ -556,10 +476,9 @@ class Passthrough(Operations):
                         key=self.cloud_object_key(path),
                         local_path=full_path,
                         file_size=file_size,
-                        chunk_size=self.CHUNK_SIZE,
-                        max_workers=self.MAX_WORKERS
                     )
                     self.chunk_readers[path] = reader
+                    
             return os.open(full_path, flags)
 
     def read(self, path, length, offset, fh):
@@ -589,12 +508,6 @@ class Passthrough(Operations):
     # Optionally, in your release() or close() logic, you might do:
     def release(self, path, fh):
         print(f'👀 release() called for {path}')
-        # If you want to close the MmapChunkedReader after the last close
-        # you'd need a reference count or similar. For simplicity:
-        reader = self.chunk_readers.get(path)
-        if reader and reader.is_fully_cached:
-            reader.close()
-            del self.chunk_readers[path]
         return os.close(fh)
 
     def create(self, path, mode, fi=None):
