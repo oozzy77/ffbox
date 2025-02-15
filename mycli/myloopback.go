@@ -11,10 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	. "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -29,6 +31,7 @@ import (
 var s3Client *s3.Client
 var bucketName string
 var rootPath string
+var SharedDownloader *manager.Downloader
 
 type FfboxNodeRoot struct {
 	// The path to the root of the underlying file system.
@@ -87,6 +90,7 @@ type FfboxNode struct {
 	// RootData points back to the root of the loopback filesystem.
 	RootData *FfboxNodeRoot
 	isComplete bool
+	lock sync.Mutex
 }
 
 // loopbackNodeEmbedder can only be implemented by the FfboxNode
@@ -141,6 +145,7 @@ func cloudFolderKey(path string) string {
 
 // isFolderCached checks whether the folder is already marked as cached.
 func (n *FfboxNode) isFolderCached(path string) bool {
+	fmt.Println("isFolderCached", path)
 	if n.isComplete {
 		return true
 	}
@@ -148,7 +153,6 @@ func (n *FfboxNode) isFolderCached(path string) bool {
 	buf := make([]byte, 2)
 	nread, err := unix.Lgetxattr(path, "user.is_complete", buf)
 	if err != nil {
-		// The attribute is probably not set.
 		return false
 	}
 
@@ -158,6 +162,7 @@ func (n *FfboxNode) isFolderCached(path string) bool {
 
 // markFolderCached marks a folder as cached.
 func (n *FfboxNode) markFolderCached(path string) {
+	fmt.Println("✅markFolderCached", path)
 	n.isComplete = true
 	err := unix.Lsetxattr(path, "user.is_complete", []byte("1"), 0)
 	if err != nil {
@@ -168,7 +173,7 @@ func (n *FfboxNode) markFolderCached(path string) {
 // Updated cloudLookup implements cloud_getattr‑like behavior using AWS SDK v2.
 // It is meant to be called (for example from a Lookup handler) when a file or folder
 // under a “cloud” path is requested.
-func cloudLookup(ctx context.Context, n *FfboxNode, name string, out *fuse.EntryOut) bool {
+func cloudLookup(ctx context.Context, n *FfboxNode, name string, path string) bool {
 	parentPath := filepath.Dir(name)
 	fmt.Printf("Checking parent: %s\n", parentPath)
 	if n.isFolderCached(parentPath) {
@@ -253,17 +258,10 @@ func cloudLookup(ctx context.Context, n *FfboxNode, name string, out *fuse.Entry
 
 func (n *FfboxNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*Inode, syscall.Errno) {
 	p := filepath.Join(n.path(), name)
-	fmt.Println("Lookup22222", p)
+	fmt.Println("Lookup22222", name, "p", p)
 	st := syscall.Stat_t{}
 	err := syscall.Lstat(p, &st)
 	if err != nil {
-		if cloudLookup(ctx, n, name, out) {
-			err = syscall.Lstat(p, &st)
-			out.Attr.FromStat(&st)
-			node := n.RootData.newNode(n.EmbeddedInode(), name, &st)
-			ch := n.NewInode(ctx, node, n.RootData.idFromStat(&st))
-			return ch, 0
-		}
 		return nil, ToErrno(err)
 	}
 
@@ -499,10 +497,50 @@ func (n *FfboxNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 
 var _ = (NodeOpener)((*FfboxNode)(nil))
 
+func cloudDownload(ctx context.Context, n *FfboxNode, name string, p string) syscall.Errno {
+	fmt.Println("cloudDownload", name)
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	if n.isFolderCached(name) {
+		return 0
+	}
+	cloudkey := cloudFolderKey(name)
+	outFile, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Errorf("unable to create file %v: %v", name, err)
+		return syscall.EIO
+	}
+	defer outFile.Close()
+	// Download the object to the file
+	numBytes, err := SharedDownloader.Download(context.TODO(), outFile, &s3.GetObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(cloudkey),
+	})
+	if err != nil {
+		fmt.Errorf("unable to download object: %v", err)
+		return syscall.EIO
+	}
+
+	fmt.Printf("Downloaded %d bytes\n", numBytes)
+	n.markFolderCached(name)
+	return 0
+
+}
+
 func (n *FfboxNode) Open(ctx context.Context, flags uint32) (fh FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	flags = flags &^ syscall.O_APPEND
-	p := n.path()
-	fmt.Println("Open999999", p)
+	name := n.Path(n.root())
+	p := filepath.Join(n.RootData.Path, name)
+	fmt.Println("Open999999", "name", name, "p", p)
+	if n.isFolderCached(p) {
+		f, err := syscall.Open(p, int(flags), 0)
+		if err != nil {
+			return nil, 0, ToErrno(err)
+		}
+		lf := NewLoopbackFile(f)
+		return lf, 0, 0
+	}
+	cloudDownload(ctx, n, name, p)
 	f, err := syscall.Open(p, int(flags), 0)
 	if err != nil {
 		return nil, 0, ToErrno(err)
@@ -514,8 +552,15 @@ func (n *FfboxNode) Open(ctx context.Context, flags uint32) (fh FileHandle, fuse
 var _ = (NodeOpendirHandler)((*FfboxNode)(nil))
 
 func (n *FfboxNode) OpendirHandle(ctx context.Context, flags uint32) (FileHandle, uint32, syscall.Errno) {
-	ds, errno := NewLoopbackDirStream(n.path())
+	name := n.Path(n.root())
+	p := filepath.Join(n.RootData.Path, name)
+	fmt.Println("OpendirHandle44444", "name", name, "p", p)
+	ds, errno := NewLoopbackDirStream(p)
 	if errno != 0 {
+		if cloudLookup(ctx, n, name, p) {
+			ds, errno := NewLoopbackDirStream(p)
+			return ds, 0, errno
+		}
 		return nil, 0, errno
 	}
 	return ds, 0, errno
@@ -677,6 +722,7 @@ func (n *FfboxNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 func NewFfboxNodeRoot(cachePath string, s3Bucket string) (InodeEmbedder, error) {
 	var st syscall.Stat_t
 	rootPath = cachePath
+	os.MkdirAll(rootPath, 0755)
 	err := syscall.Stat(cachePath, &st)
 	if err != nil {
 		return nil, err
@@ -695,6 +741,9 @@ func NewFfboxNodeRoot(cachePath string, s3Bucket string) (InodeEmbedder, error) 
 	// Create an S3 client
 	s3Client = s3.NewFromConfig(cfg)
 	bucketName = s3Bucket
+	SharedDownloader = manager.NewDownloader(s3Client, func(d *manager.Downloader) {
+		d.PartSize = 10 * 1024 * 1024
+	})
 
 	rootNode := root.newNode(nil, "", &st)
 	root.RootNode = rootNode
