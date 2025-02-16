@@ -16,6 +16,7 @@ from collections import defaultdict
 import traceback
 from botocore.exceptions import ClientError
 from queue import Queue
+import concurrent.futures
 import json
 
 aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
@@ -426,29 +427,33 @@ def ffpush(local_dir, s3_url):
         s3_prefix = s3_url
     s3_bucket_name = s3_prefix.split('/')[0]
     s3_prefix = '/'.join(s3_prefix.split('/')[1:])
-    folder_count = 0
-    for root, dirs, files in os.walk(local_dir):
-        # Get stats for each child (subdirectory) in the current directory
+    
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Local helper function to upload metadata for one directory
+    def upload_meta(root, dirs, files):
         children_stats = {}
-        
         for file in files:
+            if file == '.ffbox_dir_meta.json':
+                raise Exception(f'🔴 .ffbox_dir_meta.json is a reserved file name')
             child_path = os.path.join(root, file)
             stats = os.stat(child_path)
             rel_path = os.path.relpath(child_path, local_dir)
             children_stats[file] = {
-                "size": stats.st_size,  # Size in bytes
-                "modified_time": stats.st_mtime,  # Last modified time
-                "created_time": stats.st_ctime,  # Creation time
+                "size": stats.st_size,           # Size in bytes
+                "modified_time": stats.st_mtime,   # Last modified time
+                "created_time": stats.st_ctime,    # Creation time
                 "url": f's3://{s3_bucket_name}/{s3_prefix}/{rel_path}',
             }
-        for dir in dirs:
-            child_path = os.path.join(root, dir)
+        for d in dirs:
+            if d == '.ffbox_dir_meta.json':
+                raise Exception(f'🔴 .ffbox_dir_meta.json is a reserved file name')
+            child_path = os.path.join(root, d)
             rel_path = os.path.relpath(child_path, local_dir)
-            children_stats[dir] = {
+            children_stats[d] = {
                 "dir": True,
                 "url": f's3://{s3_bucket_name}/{s3_prefix}/{rel_path}',
             }
-        folder_count += 1
         rel_path = os.path.relpath(root, local_dir)
         key = f'{s3_prefix}/{rel_path}/.ffbox_dir_meta.json'
         print(f'👇 putting meta to s3://{s3_bucket_name}/{key}')
@@ -457,6 +462,16 @@ def ffpush(local_dir, s3_url):
             Key=key, 
             Body=json.dumps(children_stats)
         )
+
+    # Collect all directories using os.walk so we can process them concurrently
+    directories = list(os.walk(local_dir))
+    folder_count = len(directories)
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = [executor.submit(upload_meta, root, dirs, files)
+                   for root, dirs, files in directories]
+        for future in as_completed(futures):
+            # This will re-raise any exceptions thrown in upload_meta
+            future.result()
     print(f'👇 folder count: {folder_count}')
         
 
