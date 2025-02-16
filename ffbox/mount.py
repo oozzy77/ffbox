@@ -16,6 +16,7 @@ from collections import defaultdict
 import traceback
 from botocore.exceptions import ClientError
 from queue import Queue
+import json
 
 aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -412,6 +413,53 @@ class Passthrough(Operations):
         with self.locks[path]:
             return self.flush(path, fh)
 
+
+def ffpush(local_dir, s3_url):
+    print(f'pushing from {local_dir} to s3 {s3_url}')
+    local_dir = os.path.expanduser(local_dir)
+    if not os.path.exists(local_dir):
+        print(f'🔴 local directory {local_dir} does not exist')
+        return
+    if s3_url.startswith('s3://'):
+        s3_prefix = '/'.join(s3_url.split('://')[1:])
+    else:
+        s3_prefix = s3_url
+    s3_bucket_name = s3_prefix.split('/')[0]
+    s3_prefix = '/'.join(s3_prefix.split('/')[1:])
+    folder_count = 0
+    for root, dirs, files in os.walk(local_dir):
+        # Get stats for each child (subdirectory) in the current directory
+        children_stats = {}
+        
+        for file in files:
+            child_path = os.path.join(root, file)
+            stats = os.stat(child_path)
+            rel_path = os.path.relpath(child_path, local_dir)
+            children_stats[file] = {
+                "size": stats.st_size,  # Size in bytes
+                "modified_time": stats.st_mtime,  # Last modified time
+                "created_time": stats.st_ctime,  # Creation time
+                "url": f's3://{s3_bucket_name}/{s3_prefix}/{rel_path}',
+            }
+        for dir in dirs:
+            child_path = os.path.join(root, dir)
+            rel_path = os.path.relpath(child_path, local_dir)
+            children_stats[dir] = {
+                "dir": True,
+                "url": f's3://{s3_bucket_name}/{s3_prefix}/{rel_path}',
+            }
+        folder_count += 1
+        rel_path = os.path.relpath(root, local_dir)
+        key = f'{s3_prefix}/{rel_path}/.ffbox_dir_meta.json'
+        print(f'👇 putting meta to s3://{s3_bucket_name}/{key}')
+        s3_client.put_object(
+            Bucket=s3_bucket_name, 
+            Key=key, 
+            Body=json.dumps(children_stats)
+        )
+    print(f'👇 folder count: {folder_count}')
+        
+
 def ffmount(s3_url, mountpoint, cache_dir=None, foreground=True, clean_cache=False):
     fake_path = os.path.abspath(mountpoint)
     if cache_dir is None:
@@ -453,9 +501,18 @@ def main():
     parser_mount.add_argument("mountpoint", help="Local directory to mount the S3 bucket to")
     parser_mount.add_argument("--clean", action="store_true", help="Clean the cache directory before mounting")
     parser_mount.add_argument("--cache-dir", help="Cache directory to use")
+
+    # Push command
+    parser_push = subparsers.add_parser("push", help="Push a local directory to an S3 bucket")
+    parser_push.add_argument("local_dir", help="Local directory containing files to push")
+    parser_push.add_argument("s3_url", help="S3 URL to push files to")
+
+
     args = parser.parse_args()
 
     if args.command == "mount":
         ffmount(args.s3_url, args.mountpoint, cache_dir=args.cache_dir, clean_cache=args.clean)
+    elif args.command == "push":
+        ffpush(args.local_dir, args.s3_url)
     else:
         parser.print_help()
