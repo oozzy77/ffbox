@@ -1,25 +1,21 @@
 # Define a variable for the bedrock directory
 MOUNT_POINT="$HOME/bedrock"
-S3_URL="s3://ffbox-ea1/pyinstall_sdxl_gen/"
+S3_URL="ffbox-ea1"
 LOG_FILE="$HOME/ffbox_mount.log"
 
 fusermount -uz $MOUNT_POINT
-rm -rf "$HOME/.cache/ffbox"
-mkdir -p "$HOME/.cache/ffbox"
 mkdir -p $MOUNT_POINT
 
 
-yes | ffbox mount $S3_URL $MOUNT_POINT --clean --cache-dir /data/ffbox > $LOG_FILE 2>&1 &
+~/ffbox/mycli/mycli $MOUNT_POINT $S3_URL 
 sleep 3  # Wait for 3 seconds to ensure the mount is available
+cd $MOUNT_POINT/pyinstall_sdxl_gen/
 
 start_time=$(date +%s)
 echo "Start time: $(date)"
 
-cd $MOUNT_POINT
-chmod +x ./main/main
-
 # ./main/main
-strace -tt -T -e trace=file -o "$HOME/pyinstall_ffbox_bench11.log" main/main
+strace -tt -T -e trace=read,file -o "$HOME/strace_goofys.log" main/main
 # strace -tt -T -f -e trace=all -e signal=all -o "$HOME/pyinstall_ffbox_bench11.log" main/main
 
 end_time=$(date +%s)

@@ -412,19 +412,19 @@ class Passthrough(Operations):
         with self.locks[path]:
             return self.flush(path, fh)
 
-def ffmount(s3_url, mountpoint, prefix=None, foreground=True, clean_cache=False):
+def ffmount(s3_url, mountpoint, cache_dir=None, foreground=True, clean_cache=False):
     fake_path = os.path.abspath(mountpoint)
-    if prefix is None:
+    if cache_dir is None:
         home_dir = os.path.expanduser("~")
-        prefix = os.path.join(home_dir, '.cache', 'ffbox')
+        cache_dir = os.path.join(home_dir, '.cache', 'ffbox')
     if s3_url:
         s3_bucket_name = '/'.join(s3_url.split('://')[1:])
         print(f's3 bucket name: {s3_bucket_name}')
-        real_path = os.path.join(prefix, s3_bucket_name)
+        real_path = os.path.join(cache_dir, s3_bucket_name)
     else:
         if mountpoint.startswith('/'):
             mountpoint = mountpoint[1:]
-        real_path = os.path.join(prefix, mountpoint)
+        real_path = os.path.join(cache_dir, mountpoint)
     if os.path.exists(fake_path):
         print(f"Warning: {fake_path} already exists, do you want to override?")
         if input("y/n: ") != "y":
@@ -452,10 +452,10 @@ def main():
     parser_mount.add_argument("s3_url", help="URL of the S3 bucket")
     parser_mount.add_argument("mountpoint", help="Local directory to mount the S3 bucket to")
     parser_mount.add_argument("--clean", action="store_true", help="Clean the cache directory before mounting")
-
+    parser_mount.add_argument("--cache-dir", help="Cache directory to use")
     args = parser.parse_args()
 
     if args.command == "mount":
-        ffmount(args.s3_url, args.mountpoint, clean_cache=args.clean)
+        ffmount(args.s3_url, args.mountpoint, cache_dir=args.cache_dir, clean_cache=args.clean)
     else:
         parser.print_help()
