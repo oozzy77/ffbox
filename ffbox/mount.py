@@ -16,8 +16,10 @@ from collections import defaultdict
 import traceback
 from botocore.exceptions import ClientError
 from queue import Queue
-import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+from boto3.s3.transfer import TransferConfig
+import time
 
 aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
@@ -415,8 +417,40 @@ class Passthrough(Operations):
             return self.flush(path, fh)
 
 
+def check_upload_complete(local_dir, s3_url):
+    local_dir = os.path.expanduser(local_dir)
+    if not os.path.exists(local_dir):
+        print(f'🔴 local directory {local_dir} does not exist')
+        return
+    if s3_url.startswith('s3://'):
+        s3_prefix = '/'.join(s3_url.split('://')[1:])
+    s3_bucket_name = s3_prefix.split('/')[0]
+    s3_prefix = '/'.join(s3_prefix.split('/')[1:])
+    for root, dirs, files in os.walk(local_dir):
+        s3_client.list_objects_v2(Bucket=s3_bucket_name, Prefix=s3_prefix)
+        for file in files:
+            if file == '.ffbox_dir_meta.json':
+                print(f'🔴 .ffbox_dir_meta.json is a reserved file name')
+                continue
+            child_path = os.path.join(root, file)
+            rel_path = os.path.relpath(child_path, local_dir)
+            object_key = f'{s3_prefix}/{rel_path}'.strip('/')
+            print(f'👇 checking {object_key}')
+    return
+
+# Upload file with multipart upload
+config = TransferConfig(
+    multipart_threshold=1024 * 25,  # 25MB threshold for multipart uploads
+    max_concurrency=10,  # Max parallel uploads
+    use_threads=True  # Use threading for faster uploads
+)
 def ffpush(local_dir, s3_url):
+    # TODO: to be implemented
     print(f'pushing from {local_dir} to s3 {s3_url}')
+    if not aws_access_key or not aws_secret_key:
+        print(f'🔴 no aws credentials found, please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY')
+        return
+    start_time = time.time()
     local_dir = os.path.expanduser(local_dir)
     if not os.path.exists(local_dir):
         print(f'🔴 local directory {local_dir} does not exist')
@@ -428,34 +462,42 @@ def ffpush(local_dir, s3_url):
     s3_bucket_name = s3_prefix.split('/')[0]
     s3_prefix = '/'.join(s3_prefix.split('/')[1:])
     
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     # Local helper function to upload metadata for one directory
-    def upload_meta(root, dirs, files):
+    def upload_meta(root, dirs, files, idx, folder_count):
         children_stats = {}
         for file in files:
             if file == '.ffbox_dir_meta.json':
-                raise Exception(f'🔴 .ffbox_dir_meta.json is a reserved file name')
+                print(f'🔴 .ffbox_dir_meta.json is a reserved file name')
+                continue
             child_path = os.path.join(root, file)
             stats = os.stat(child_path)
             rel_path = os.path.relpath(child_path, local_dir)
+            object_key = f'{s3_prefix}/{rel_path}'.strip('/')
             children_stats[file] = {
                 "size": stats.st_size,           # Size in bytes
                 "modified_time": stats.st_mtime,   # Last modified time
                 "created_time": stats.st_ctime,    # Creation time
-                "url": f's3://{s3_bucket_name}/{s3_prefix}/{rel_path}',
+                "url": f's3://{s3_bucket_name}/{object_key}',
             }
+            print(f'👇 uploading {idx + 1}/{folder_count} {child_path} to s3://{s3_bucket_name}')
+
+            s3_client.upload_file(child_path, s3_bucket_name, object_key, Config=config)
+
         for d in dirs:
             if d == '.ffbox_dir_meta.json':
-                raise Exception(f'🔴 .ffbox_dir_meta.json is a reserved file name')
+                print(f'🔴 .ffbox_dir_meta.json is a reserved file name')
+                continue
             child_path = os.path.join(root, d)
             rel_path = os.path.relpath(child_path, local_dir)
+            object_key = f'{s3_prefix}/{rel_path}'.strip('/')
             children_stats[d] = {
                 "dir": True,
-                "url": f's3://{s3_bucket_name}/{s3_prefix}/{rel_path}',
+                "url": f's3://{s3_bucket_name}/{object_key}',
             }
         rel_path = os.path.relpath(root, local_dir)
-        key = f'{s3_prefix}/{rel_path}/.ffbox_dir_meta.json'
+        if rel_path == '.':
+            rel_path = ''
+        key = '/'.join([x for x in [s3_prefix, rel_path, '.ffbox_dir_meta.json'] if x != ''])
         print(f'👇 putting meta to s3://{s3_bucket_name}/{key}')
         s3_client.put_object(
             Bucket=s3_bucket_name, 
@@ -467,12 +509,14 @@ def ffpush(local_dir, s3_url):
     directories = list(os.walk(local_dir))
     folder_count = len(directories)
     with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = [executor.submit(upload_meta, root, dirs, files)
-                   for root, dirs, files in directories]
+        futures = [executor.submit(upload_meta, root, dirs, files, idx, folder_count)
+            for idx, (root, dirs, files) in enumerate(directories)]
         for future in as_completed(futures):
             # This will re-raise any exceptions thrown in upload_meta
             future.result()
+    end_time = time.time()
     print(f'👇 folder count: {folder_count}')
+    print(f'👇 time taken: {end_time - start_time} seconds')
         
 
 def ffmount(s3_url, mountpoint, cache_dir=None, foreground=True, clean_cache=False):
