@@ -1,6 +1,6 @@
 # Define a variable for the bedrock directory
 MOUNT_POINT="$HOME/bedrock"
-S3_URL="s3://ffbox-ea1/pyinstall_sdxl_gen/"
+S3_URL="s3://ffbox-ea1/pyinstall_sdxl_with_meta2/"
 LOG_FILE="$HOME/ffbox_mount.log"
 
 fusermount -uz $MOUNT_POINT

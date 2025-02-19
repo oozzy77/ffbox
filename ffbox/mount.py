@@ -34,15 +34,17 @@ else:
     s3_client = boto3.client('s3', config=config)
 
 META_DIR = '.ffbox_noot'
+DIR_META_FILE = '.ffbox_dir_meta.json'
 
 uid = os.getuid()
 gid = os.getgid()
 
 class Passthrough(Operations):
-    def __init__(self, root, mountpoint, s3_url = None):
+    def __init__(self, root, mountpoint, s3_url = None, is_ffbox_folder = False):
         self.root = root
         self.mountpoint = mountpoint
         self.s3_url = s3_url
+        self.is_ffbox_folder = is_ffbox_folder
         parsed_url = urlparse(s3_url)
         self.bucket = parsed_url.netloc
         self.prefix = parsed_url.path.strip('/')  # Remove both leading and trailing slashes
@@ -138,12 +140,20 @@ class Passthrough(Operations):
         if self.is_folder_cached(parent_path):
             raise FuseOSError(errno.ENOENT)
         print(f'🟠 cloud getting attributes of {path}', f'parent: {parent_path}')
-
-        response = s3_client.list_objects_v2(
-            Bucket=self.bucket,
-            Prefix=self.cloud_folder_key(parent_path),
-            Delimiter='/'  # This makes the operation more efficient for folders
-        )
+        
+        if self.is_ffbox_folder:
+            response = s3_client.get_object(
+                Bucket=self.bucket,
+                Key=self.cloud_folder_key(parent_path)
+            )
+            response = json.loads(response['Body'].read().decode('utf-8'))
+            print('🟠 cloud getting attributes of', parent_path, response)
+        else:
+            response = s3_client.list_objects_v2(
+                Bucket=self.bucket,
+                Prefix=self.cloud_folder_key(parent_path),
+                Delimiter='/'  # This makes the operation more efficient for folders
+            )
 
         if response.get('IsTruncated'):
             print(f"🔴Warning: Directory listing for {path} is truncated!")
@@ -418,6 +428,7 @@ class Passthrough(Operations):
 
 
 def check_upload_complete(local_dir, s3_url):
+    # TODO: to be implemented
     local_dir = os.path.expanduser(local_dir)
     if not os.path.exists(local_dir):
         print(f'🔴 local directory {local_dir} does not exist')
@@ -429,7 +440,7 @@ def check_upload_complete(local_dir, s3_url):
     for root, dirs, files in os.walk(local_dir):
         s3_client.list_objects_v2(Bucket=s3_bucket_name, Prefix=s3_prefix)
         for file in files:
-            if file == '.ffbox_dir_meta.json':
+            if file == DIR_META_FILE:
                 print(f'🔴 .ffbox_dir_meta.json is a reserved file name')
                 continue
             child_path = os.path.join(root, file)
@@ -445,7 +456,6 @@ config = TransferConfig(
     use_threads=True  # Use threading for faster uploads
 )
 def ffpush(local_dir, s3_url):
-    # TODO: to be implemented
     print(f'pushing from {local_dir} to s3 {s3_url}')
     if not aws_access_key or not aws_secret_key:
         print(f'🔴 no aws credentials found, please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY')
@@ -466,7 +476,7 @@ def ffpush(local_dir, s3_url):
     def upload_meta(root, dirs, files, idx, folder_count):
         children_stats = {}
         for file in files:
-            if file == '.ffbox_dir_meta.json':
+            if file == DIR_META_FILE:
                 print(f'🔴 .ffbox_dir_meta.json is a reserved file name')
                 continue
             child_path = os.path.join(root, file)
@@ -484,7 +494,7 @@ def ffpush(local_dir, s3_url):
             s3_client.upload_file(child_path, s3_bucket_name, object_key, Config=config)
 
         for d in dirs:
-            if d == '.ffbox_dir_meta.json':
+            if d == DIR_META_FILE:
                 print(f'🔴 .ffbox_dir_meta.json is a reserved file name')
                 continue
             child_path = os.path.join(root, d)
@@ -497,7 +507,7 @@ def ffpush(local_dir, s3_url):
         rel_path = os.path.relpath(root, local_dir)
         if rel_path == '.':
             rel_path = ''
-        key = '/'.join([x for x in [s3_prefix, rel_path, '.ffbox_dir_meta.json'] if x != ''])
+        key = '/'.join([x for x in [s3_prefix, rel_path, DIR_META_FILE] if x != ''])
         print(f'👇 putting meta to s3://{s3_bucket_name}/{key}')
         s3_client.put_object(
             Bucket=s3_bucket_name, 
@@ -518,7 +528,24 @@ def ffpush(local_dir, s3_url):
     print(f'👇 folder count: {folder_count}')
     print(f'👇 time taken: {end_time - start_time} seconds')
         
-
+def check_is_ffbox_folder(url: str):
+    if url.startswith('s3://'):
+        s3_prefix = '/'.join(url.split('://')[1:])
+        s3_bucket_name = s3_prefix.split('/')[0]
+        s3_root = '/'.join(s3_prefix.split('/')[1:]).strip('/')
+        print(f'👇 checking {s3_root}/{DIR_META_FILE} in bucket {s3_bucket_name}')
+        try:
+            s3_client.head_object(
+                Bucket=s3_bucket_name, 
+                Key=f'{s3_root}/{DIR_META_FILE}')
+            return True
+        except ClientError as e:
+            # Not found
+            if e.response['Error']['Code'] in ('404', 'NotFound'):
+                return False
+            else:
+                raise e
+    return False
 def ffmount(s3_url, mountpoint, cache_dir=None, foreground=True, clean_cache=False):
     fake_path = os.path.abspath(mountpoint)
     if cache_dir is None:
@@ -539,13 +566,17 @@ def ffmount(s3_url, mountpoint, cache_dir=None, foreground=True, clean_cache=Fal
             return
         else:
             shutil.rmtree(fake_path)
+    # check if the s3 folder is a ffbox folder
+    is_ffbox_folder = check_is_ffbox_folder(s3_url)
+    print(f'🦄 is ffbox meta folder:', is_ffbox_folder)
+
     if clean_cache and os.path.exists(real_path):
         shutil.rmtree(real_path)
     os.makedirs(fake_path, exist_ok=True)
     os.makedirs(real_path, exist_ok=True)
 
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
-    passthru = Passthrough(real_path, fake_path, s3_url)
+    passthru = Passthrough(real_path, fake_path, s3_url, is_ffbox_folder)
     passthru.start_background_pulling()
     FUSE(passthru, fake_path, foreground=foreground)
 
