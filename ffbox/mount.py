@@ -142,12 +142,17 @@ class Passthrough(Operations):
         print(f'🟠 cloud getting attributes of {path}', f'parent: {parent_path}')
         
         if self.is_ffbox_folder:
-            response = s3_client.get_object(
-                Bucket=self.bucket,
-                Key=self.cloud_folder_key(parent_path)
-            )
-            response = json.loads(response['Body'].read().decode('utf-8'))
-            print('🟠 cloud getting attributes of', parent_path, response)
+            print('🟠 cloud getting attributes of', self.cloud_folder_key(parent_path) + '/' + DIR_META_FILE)
+            try:
+                response = s3_client.get_object(
+                    Bucket=self.bucket,
+                    Key=self.cloud_folder_key(parent_path) + DIR_META_FILE
+                )
+                response = json.loads(response['Body'].read().decode('utf-8'))
+                print('🟠 cloud getting folder meta.json of', response)
+            except Exception as e:
+                print(f'🔴 error getting folder meta.json of {path}: {e}')
+                raise FuseOSError(errno.ENOENT)
         else:
             response = s3_client.list_objects_v2(
                 Bucket=self.bucket,
@@ -485,8 +490,8 @@ def ffpush(local_dir, s3_url):
             object_key = f'{s3_prefix}/{rel_path}'.strip('/')
             children_stats[file] = {
                 "size": stats.st_size,           # Size in bytes
-                "modified_time": stats.st_mtime,   # Last modified time
-                "created_time": stats.st_ctime,    # Creation time
+                "mtime": stats.st_mtime,   # Last modified time
+                "ctime": stats.st_ctime,    # Creation time
                 "url": f's3://{s3_bucket_name}/{object_key}',
             }
             print(f'👇 uploading {idx + 1}/{folder_count} {child_path} to s3://{s3_bucket_name}')
