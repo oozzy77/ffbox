@@ -176,11 +176,12 @@ class Passthrough(Operations):
         self.cloud_readdir(parent_path)
 
 
-    def cloud_readdir(self, parent_path):
+    def cloud_readdir(self, parent_path: str):
+        parent_path = parent_path.lstrip('/')
         if self.is_ffbox_folder:
             try:
                 url = os.getxattr(self._full_path(parent_path), 'user.url').decode('utf-8').rstrip('/')
-                print('🟠 cloud cloud_readdir of',parent_path, url)
+                print('🟠 cloud cloud_readdir path', parent_path, 'url', url)
                 json_str = nsclient.get_object(f'{url}/{DIR_META_FILE}')
                 response = json.loads(json_str)
                 print('🟠 cloud getting folder meta.json of', response)
@@ -487,6 +488,8 @@ config = TransferConfig(
 def ffdeploy_path(local_dir:str):
     start_time = time.time()
     local_dir = os.path.expanduser(local_dir)
+    local_dir = os.path.abspath(local_dir)
+    print('local_dir', local_dir)
     if not os.path.isdir(local_dir) or not os.path.exists(local_dir):
         print(f'🔴 local directory {local_dir} is not a folder')
         return
@@ -534,6 +537,7 @@ def ffdeploy_path(local_dir:str):
     end_time = time.time()
     print(f'👇 folder count: {folder_count}')
     print(f'👇 time taken: {end_time - start_time} seconds')
+
 def ffpush(local_dir, s3_url):
     print(f'pushing from {local_dir} to s3 {s3_url}')
     if not aws_access_key or not aws_secret_key:
@@ -630,8 +634,11 @@ def check_is_ffbox_folder(url: str):
         print('2222 metafile', os.path.join(url, DIR_META_FILE))
         return os.path.exists(os.path.join(url, DIR_META_FILE))
     return False
-def ffmount(url:str, mountpoint, cache_dir=None, foreground=True, clean_cache=False):
+def ffmount(url:str, mountpoint, cache_dir=None, cache_repo=None, foreground=True, clean_cache=False):
+    print('333ffmount')
     fake_path = os.path.abspath(mountpoint)
+    mountpoint = os.path.expanduser('~')
+    mountpoint = os.path.abspath(mountpoint)
     global nsclient
     if cache_dir is None:
         home_dir = os.path.expanduser("~")
@@ -641,6 +648,7 @@ def ffmount(url:str, mountpoint, cache_dir=None, foreground=True, clean_cache=Fa
         nsclient = PathClient(url)
         if mountpoint.startswith('/'):
             mountpoint = mountpoint[1:]
+        #TODO: need to rework on whats the default real_path in path mode
         real_path = os.path.join(cache_dir, mountpoint)
     elif url.startswith('s3://'):
         print('is s3 ')
@@ -650,7 +658,13 @@ def ffmount(url:str, mountpoint, cache_dir=None, foreground=True, clean_cache=Fa
         real_path = os.path.join(cache_dir, s3_bucket_name)
     else:
         raise Exception('Network storage type not supported!')
-        
+    if cache_repo:
+        cache_repo = os.path.expanduser(cache_repo)
+        cache_repo = os.path.abspath(cache_repo)
+        print(f'specific cache repo: {cache_repo}')
+        real_path = cache_repo
+    print(f"real storage path: {real_path}, fake storage path: {fake_path}")
+
     if os.path.exists(fake_path):
         print(f"Warning: {fake_path} already exists, do you want to override?")
         if input("y/n: ") != "y":
@@ -669,7 +683,6 @@ def ffmount(url:str, mountpoint, cache_dir=None, foreground=True, clean_cache=Fa
     os.makedirs(fake_path, exist_ok=True)
     os.makedirs(real_path, exist_ok=True)
 
-    print(f"real storage path: {real_path}, fake storage path: {fake_path}")
     passthru = Passthrough(real_path, fake_path, url, is_ffbox_folder)
     # passthru.start_background_pulling()
     FUSE(passthru, fake_path, foreground=foreground)
@@ -685,6 +698,7 @@ def main():
     parser_mount.add_argument("mountpoint", help="Local directory to mount the S3 bucket to")
     parser_mount.add_argument("--clean", action="store_true", help="Clean the cache directory before mounting")
     parser_mount.add_argument("--cache-dir", help="Cache directory to use")
+    parser_mount.add_argument("--cache-repo", help="Override specific cache path to store for this repo only")
 
     # Push command
     parser_push = subparsers.add_parser("push", help="Push a local directory to an S3 bucket")
@@ -698,7 +712,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "mount":
-        ffmount(args.s3_url, args.mountpoint, cache_dir=args.cache_dir, clean_cache=args.clean)
+        ffmount(args.s3_url, args.mountpoint, cache_dir=args.cache_dir, cache_repo=args.cache_repo, clean_cache=args.clean)
     elif args.command == "push":
         ffpush(args.local_dir, args.s3_url)
     elif args.command == "deploy":
