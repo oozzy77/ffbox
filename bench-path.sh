@@ -9,7 +9,7 @@ rm -rf $HOME/.cache/ffbox/tina-comfy
 mkdir -p $MOUNT_POINT
 
 # ffbox mount /home/ec2-user/.cache/ffbox/comfy11 $MOUNT_POINT > "$HOME/ffbox11.log" 2>&1 &
-yes | ffbox mount $SOURCE_URL $MOUNT_POINT --cache-repo "$HOME/.cache/ffbox/tina-comfy"
+yes | ffbox mount $SOURCE_URL $MOUNT_POINT --clean --cache-repo "$HOME/.cache/ffbox/tina-comfy"
 mount_pid=$!
 echo "Mount process PID: $mount_pid"
 

@@ -199,11 +199,12 @@ class Passthrough(Operations):
                     mtime = attr.get('mtime')
                     if mtime is None:
                         mtime = time.time()
+                    file_path = os.path.join(self.root, parent_path, file_name)
                     if size is None: # is folder
-                        os.makedirs(os.path.join(self.root, parent_path, file_name), exist_ok=True)
+                        os.makedirs(file_path, exist_ok=True)
+                        os.setxattr(file_path, 'user.url', url.encode('utf-8'))
                     else: # is file 
                         # Create a sparse file of the same size as the S3 object
-                        file_path = os.path.join(self.root, parent_path, file_name)
                         print('creating sparse file', file_path)
                         if not os.path.exists(file_path):
                             with open(file_path, 'wb') as f:
@@ -212,7 +213,8 @@ class Passthrough(Operations):
                             os.utime(file_path, (mtime, mtime))
                             os.setxattr(file_path, 'user.url', url.encode('utf-8'))
             except Exception as e:
-                print(f'🔴 error getting folder meta.json of {parent_path}: {e}')
+                print('🔴 error reading url of', self._full_path(parent_path))
+                traceback.print_exc()
                 raise FuseOSError(errno.ENOENT)
         else:
             response = s3_client.list_objects_v2(
@@ -357,15 +359,41 @@ class Passthrough(Operations):
 
     def open(self, path, flags):
         print(f'👇opening file {path}')
-        
+        fullpath = self._full_path(path)
+        url = os.getxattr(fullpath, 'user.url').decode('utf-8').rstrip('/')
+        if url.startswith('/'):
+            # Check if any write flags are present
+            write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND
+            if flags & write_flags:
+                print(f'🟠 Opening local file {path} for writing')
+                # copy content from url to fullpath, but keep the metadata of original fullpath file
+                with open(url, 'rb') as src, open(fullpath, 'wb') as dst:
+                    dst.write(src.read())
+                # Mark as cached since we now have the full content
+                self.mark_file_cached(path)
+                # change user.url xattr along fullpath
+                current_path = fullpath
+                while current_path != self.root:
+                    current_path = os.path.dirname(current_path)
+                    print(f'Setting xattr for {current_path} - before: {os.getxattr(current_path, "user.url").decode("utf-8")}')
+                    try:
+                        os.setxattr(current_path, 'user.url', current_path.encode('utf-8'))
+                    except OSError as e:
+                        print(f'Warning: Could not set xattr for {current_path}: {e}')
+                    print(f'Setting xattr for {current_path} - after: {os.getxattr(current_path, "user.url").decode("utf-8")}')
+                return os.open(fullpath, flags)
+            else:
+                print(f'🟢 Opening local file {path} for reading')
+                return os.open(url, flags)
         if self.is_file_cached(path):
-            return os.open(self._full_path(path), flags)
-
+            return os.open(fullpath, flags)
+        
+        print(f'🟠 cloud open file {path}, fullpath: {fullpath}, url: {url}')
         # Acquire the lock to download the file
         with self.locks[path]:
             # Double-check if the file was downloaded while waiting for the lock
             if self.is_file_cached(path):
-                return os.open(self._full_path(path), flags)
+                return os.open(fullpath, flags)
                 
             full_path = self._full_path(path)
             try:
@@ -635,7 +663,6 @@ def check_is_ffbox_folder(url: str):
         return os.path.exists(os.path.join(url, DIR_META_FILE))
     return False
 def ffmount(url:str, mountpoint, cache_dir=None, cache_repo=None, foreground=True, clean_cache=False):
-    print('333ffmount')
     fake_path = os.path.abspath(mountpoint)
     mountpoint = os.path.expanduser('~')
     mountpoint = os.path.abspath(mountpoint)
@@ -676,12 +703,12 @@ def ffmount(url:str, mountpoint, cache_dir=None, cache_repo=None, foreground=Tru
     # check if the s3 folder is a ffbox folder
     is_ffbox_folder = check_is_ffbox_folder(url)
     print(f'🦄 is ffbox meta folder:', is_ffbox_folder)
-    os.setxattr(real_path, 'user.url', url.rstrip('/').encode('utf-8'))
 
     if clean_cache and os.path.exists(real_path):
         shutil.rmtree(real_path)
     os.makedirs(fake_path, exist_ok=True)
     os.makedirs(real_path, exist_ok=True)
+    os.setxattr(real_path, 'user.url', url.strip().rstrip('/').encode('utf-8'))
 
     passthru = Passthrough(real_path, fake_path, url, is_ffbox_folder)
     # passthru.start_background_pulling()
