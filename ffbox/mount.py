@@ -39,6 +39,39 @@ DIR_META_FILE = '.ffbox_dir_meta.json'
 uid = os.getuid()
 gid = os.getgid()
 
+class NsClient: # Network storage client
+    def __init__(self, url: str):
+        self.root = url
+
+    def get_object(self, relpath: str) -> str:
+        raise Exception('Please implement me!')
+
+nsclient:NsClient = None
+
+class S3Client(NsClient):
+    def __init__(self, url: str):
+        super().__init__(url)
+        parsed_url = urlparse(url)
+        self.bucket = parsed_url.netloc
+        self.prefix = parsed_url.path.strip('/')  # Remove both leading and trailing slashes
+
+    def get_object(self, relpath: str): 
+        response = s3_client.get_object(
+            Bucket=self.bucket,
+            Key=f'{self.prefix}/{relpath}'
+        )
+        return response['Body'].read().decode('utf-8')
+
+class PathClient(NsClient):
+    def __init__(self, url: str):
+        super().__init__(url)
+        self.source = url.rstrip('/') # source folder
+
+    def get_object(self, relpath: str):
+        with open(os.path.join(self.source, relpath), 'r') as file:
+            content = file.read()
+        return content
+
 class Passthrough(Operations):
     def __init__(self, root, mountpoint, s3_url = None, is_ffbox_folder = False):
         self.root = root
@@ -140,18 +173,45 @@ class Passthrough(Operations):
         if self.is_folder_cached(parent_path):
             raise FuseOSError(errno.ENOENT)
         print(f'🟠 cloud getting attributes of {path}', f'parent: {parent_path}')
-        
+        self.cloud_readdir(parent_path)
+
+
+    def cloud_readdir(self, parent_path):
         if self.is_ffbox_folder:
-            print('🟠 cloud getting attributes of', self.cloud_folder_key(parent_path) + '/' + DIR_META_FILE)
             try:
-                response = s3_client.get_object(
-                    Bucket=self.bucket,
-                    Key=self.cloud_folder_key(parent_path) + DIR_META_FILE
-                )
-                response = json.loads(response['Body'].read().decode('utf-8'))
+                url = os.getxattr(self._full_path(parent_path), 'user.url').decode('utf-8').rstrip('/')
+                print('🟠 cloud cloud_readdir of',parent_path, url)
+                json_str = nsclient.get_object(f'{url}/{DIR_META_FILE}')
+                response = json.loads(json_str)
                 print('🟠 cloud getting folder meta.json of', response)
+                for file_name in response:
+                    print('filename', file_name, 'parentpath',parent_path)
+                    attr = response[file_name]
+                    size = attr.get('size')
+                    ctime = attr.get('ctime')
+                    url = attr.get('url')
+                    if url is None:
+                        print('🔴 error getting url of file {parent_path}/{file_name}')
+                        continue
+                    if ctime is None:
+                        ctime = time.time()
+                    mtime = attr.get('mtime')
+                    if mtime is None:
+                        mtime = time.time()
+                    if size is None: # is folder
+                        os.makedirs(os.path.join(self.root, parent_path, file_name), exist_ok=True)
+                    else: # is file 
+                        # Create a sparse file of the same size as the S3 object
+                        file_path = os.path.join(self.root, parent_path, file_name)
+                        print('creating sparse file', file_path)
+                        if not os.path.exists(file_path):
+                            with open(file_path, 'wb') as f:
+                                f.truncate(size)  # Create sparse file of exact size
+                            # Set file attributes
+                            os.utime(file_path, (mtime, mtime))
+                            os.setxattr(file_path, 'user.url', url.encode('utf-8'))
             except Exception as e:
-                print(f'🔴 error getting folder meta.json of {path}: {e}')
+                print(f'🔴 error getting folder meta.json of {parent_path}: {e}')
                 raise FuseOSError(errno.ENOENT)
         else:
             response = s3_client.list_objects_v2(
@@ -160,62 +220,29 @@ class Passthrough(Operations):
                 Delimiter='/'  # This makes the operation more efficient for folders
             )
 
-        if response.get('IsTruncated'):
-            print(f"🔴Warning: Directory listing for {path} is truncated!")
+            if response.get('IsTruncated'):
+                print(f"🔴Warning: Directory listing for {parent_path} is truncated!")
 
-        # Add directories (common prefixes) to dirents
-        parent_path = parent_path.lstrip('/')
-        for common_prefix in response.get('CommonPrefixes', []):
-            dir_name = common_prefix['Prefix'].rstrip('/').split('/')[-1]
-            os.makedirs(os.path.join(self.root, parent_path, dir_name), exist_ok=True)
-
-        # Add files to dirents
-        for obj in response.get('Contents', []):
-            file_name = obj['Key'].split('/')[-1]
-            # Create an empty placeholder file with the attributes
-            file_path = os.path.join(self.root, parent_path, file_name)
-            if not os.path.exists(file_path):
-                # Create a sparse file of the same size as the S3 object
-                with open(file_path, 'wb') as f:
-                    f.truncate(obj['Size'])  # Create sparse file of exact size
-                # Set file attributes
-                os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
-        # mark this path as completed cached
-        self.mark_folder_cached(parent_path)
-
-    def cloud_readdir(self, path):
-        print(f'🟠reading cloud directory path: {path}')
-        # List objects in the S3 bucket with the specified prefix
-        response = s3_client.list_objects_v2(Bucket=self.bucket, Prefix=self.cloud_folder_key(path), Delimiter='/')        
-        
-        yield '.'
-        yield '..'
-
-        # Add directories (common prefixes) to dirents
-        if 'CommonPrefixes' in response:
-            for common_prefix in response['CommonPrefixes']:
+            # Add directories (common prefixes) to dirents
+            parent_path = parent_path.lstrip('/')
+            for common_prefix in response.get('CommonPrefixes', []):
                 dir_name = common_prefix['Prefix'].rstrip('/').split('/')[-1]
-                yield dir_name
-                os.makedirs(os.path.join(self.root, path.lstrip('/'), dir_name), exist_ok=True)
-                
+                os.makedirs(os.path.join(self.root, parent_path, dir_name), exist_ok=True)
 
-        # Add files to dirents
-        if 'Contents' in response:
-            for obj in response['Contents']:
+            # Add files to dirents
+            for obj in response.get('Contents', []):
                 file_name = obj['Key'].split('/')[-1]
-                yield file_name
-                
                 # Create an empty placeholder file with the attributes
-                file_path = os.path.join(self.root, path.lstrip('/'), file_name)
+                file_path = os.path.join(self.root, parent_path, file_name)
                 if not os.path.exists(file_path):
                     # Create a sparse file of the same size as the S3 object
                     with open(file_path, 'wb') as f:
                         f.truncate(obj['Size'])  # Create sparse file of exact size
                     # Set file attributes
                     os.utime(file_path, (obj['LastModified'].timestamp(), obj['LastModified'].timestamp()))
-
         # mark this path as completed cached
-        self.mark_folder_cached(path)
+        self.mark_folder_cached(parent_path)   
+
 
     def is_folder_cached(self, path):
         if path in self.cached_dir:
@@ -274,17 +301,14 @@ class Passthrough(Operations):
 
     def readdir(self, path, fh):
         print(f'👇reading directory {path}')
-        
-        if self.is_folder_cached(path):
-            yield '.'
-            yield '..'
-            # Add more entries as needed
-            for entry in os.listdir(self._full_path(path)):
-                yield entry
-        else:
+        if not self.is_folder_cached(path):
             with self.locks[path]:
-                yield from self.cloud_readdir(path)
-
+                self.cloud_readdir(path)
+        yield '.'
+        yield '..'
+        # Add more entries as needed
+        for entry in os.listdir(self._full_path(path)):
+            yield entry
     def readlink(self, path):
         print('👇 reading link', path)
         pathname = os.readlink(self._full_path(path))
@@ -460,6 +484,56 @@ config = TransferConfig(
     max_concurrency=10,  # Max parallel uploads
     use_threads=True  # Use threading for faster uploads
 )
+def ffdeploy_path(local_dir:str):
+    start_time = time.time()
+    local_dir = os.path.expanduser(local_dir)
+    if not os.path.isdir(local_dir) or not os.path.exists(local_dir):
+        print(f'🔴 local directory {local_dir} is not a folder')
+        return
+    
+    # Local helper function to upload metadata for one directory
+    def upload_meta(root, dirs, files, idx, folder_count):
+        children_stats = {}
+        for file in files:
+            if file == DIR_META_FILE:
+                print(f'🔴 .ffbox_dir_meta.json is a reserved file name')
+                continue
+            child_path = os.path.join(root, file)
+            stats = os.stat(child_path)
+            rel_path = os.path.relpath(child_path, local_dir)
+            children_stats[file] = {
+                "size": stats.st_size,           # Size in bytes
+                "mtime": stats.st_mtime,   # Last modified time
+                "ctime": stats.st_atime,    # Creation time
+                "url": child_path,
+            }
+
+        for d in dirs:
+            if d == DIR_META_FILE:
+                print(f'🔴 .ffbox_dir_meta.json is a reserved file name')
+                continue
+            child_path = os.path.join(root, d)
+            rel_path = os.path.relpath(child_path, local_dir)
+            children_stats[d] = {
+                "url": child_path,
+            }
+        json_path = os.path.join(root, DIR_META_FILE)
+        with open(json_path, 'w') as f:
+            json.dump(children_stats, f)
+        print(f'👇 saved {idx + 1}/{folder_count} {json_path}')
+
+    # Collect all directories using os.walk so we can process them concurrently
+    directories = list(os.walk(local_dir))
+    folder_count = len(directories)
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = [executor.submit(upload_meta, root, dirs, files, idx, folder_count)
+            for idx, (root, dirs, files) in enumerate(directories)]
+        for future in as_completed(futures):
+            # This will re-raise any exceptions thrown in upload_meta
+            future.result()
+    end_time = time.time()
+    print(f'👇 folder count: {folder_count}')
+    print(f'👇 time taken: {end_time - start_time} seconds')
 def ffpush(local_dir, s3_url):
     print(f'pushing from {local_dir} to s3 {s3_url}')
     if not aws_access_key or not aws_secret_key:
@@ -491,7 +565,7 @@ def ffpush(local_dir, s3_url):
             children_stats[file] = {
                 "size": stats.st_size,           # Size in bytes
                 "mtime": stats.st_mtime,   # Last modified time
-                "ctime": stats.st_ctime,    # Creation time
+                "ctime": stats.st_atime,    # Creation time
                 "url": f's3://{s3_bucket_name}/{object_key}',
             }
             print(f'👇 uploading {idx + 1}/{folder_count} {child_path} to s3://{s3_bucket_name}')
@@ -534,6 +608,8 @@ def ffpush(local_dir, s3_url):
     print(f'👇 time taken: {end_time - start_time} seconds')
         
 def check_is_ffbox_folder(url: str):
+    url = url.strip(' ').rstrip('/')
+    print('checking url is ffbox folder', url)
     if url.startswith('s3://'):
         s3_prefix = '/'.join(url.split('://')[1:])
         s3_bucket_name = s3_prefix.split('/')[0]
@@ -550,20 +626,31 @@ def check_is_ffbox_folder(url: str):
                 return False
             else:
                 raise e
+    if url.startswith('/'):
+        print('2222 metafile', os.path.join(url, DIR_META_FILE))
+        return os.path.exists(os.path.join(url, DIR_META_FILE))
     return False
-def ffmount(s3_url, mountpoint, cache_dir=None, foreground=True, clean_cache=False):
+def ffmount(url:str, mountpoint, cache_dir=None, foreground=True, clean_cache=False):
     fake_path = os.path.abspath(mountpoint)
+    global nsclient
     if cache_dir is None:
         home_dir = os.path.expanduser("~")
         cache_dir = os.path.join(home_dir, '.cache', 'ffbox')
-    if s3_url:
-        s3_bucket_name = '/'.join(s3_url.split('://')[1:])
-        print(f's3 bucket name: {s3_bucket_name}')
-        real_path = os.path.join(cache_dir, s3_bucket_name)
-    else:
+    if url.startswith('/'):
+        print('is path source')
+        nsclient = PathClient(url)
         if mountpoint.startswith('/'):
             mountpoint = mountpoint[1:]
         real_path = os.path.join(cache_dir, mountpoint)
+    elif url.startswith('s3://'):
+        print('is s3 ')
+        nsclient = S3Client(url)
+        s3_bucket_name = '/'.join(url.split('://')[1:])
+        print(f's3 bucket name: {s3_bucket_name}')
+        real_path = os.path.join(cache_dir, s3_bucket_name)
+    else:
+        raise Exception('Network storage type not supported!')
+        
     if os.path.exists(fake_path):
         print(f"Warning: {fake_path} already exists, do you want to override?")
         if input("y/n: ") != "y":
@@ -571,9 +658,11 @@ def ffmount(s3_url, mountpoint, cache_dir=None, foreground=True, clean_cache=Fal
             return
         else:
             shutil.rmtree(fake_path)
+    os.makedirs(real_path, exist_ok=True)
     # check if the s3 folder is a ffbox folder
-    is_ffbox_folder = check_is_ffbox_folder(s3_url)
+    is_ffbox_folder = check_is_ffbox_folder(url)
     print(f'🦄 is ffbox meta folder:', is_ffbox_folder)
+    os.setxattr(real_path, 'user.url', url.rstrip('/').encode('utf-8'))
 
     if clean_cache and os.path.exists(real_path):
         shutil.rmtree(real_path)
@@ -581,8 +670,8 @@ def ffmount(s3_url, mountpoint, cache_dir=None, foreground=True, clean_cache=Fal
     os.makedirs(real_path, exist_ok=True)
 
     print(f"real storage path: {real_path}, fake storage path: {fake_path}")
-    passthru = Passthrough(real_path, fake_path, s3_url, is_ffbox_folder)
-    passthru.start_background_pulling()
+    passthru = Passthrough(real_path, fake_path, url, is_ffbox_folder)
+    # passthru.start_background_pulling()
     FUSE(passthru, fake_path, foreground=foreground)
 
 def main():
@@ -601,7 +690,10 @@ def main():
     parser_push = subparsers.add_parser("push", help="Push a local directory to an S3 bucket")
     parser_push.add_argument("local_dir", help="Local directory containing files to push")
     parser_push.add_argument("s3_url", help="S3 URL to push files to")
-
+    
+    # Deploy path command
+    parser_deploy = subparsers.add_parser("deploy", help="Deploy a network directory")
+    parser_deploy.add_argument("local_dir", help="Local directory containing files to push")
 
     args = parser.parse_args()
 
@@ -609,5 +701,7 @@ def main():
         ffmount(args.s3_url, args.mountpoint, cache_dir=args.cache_dir, clean_cache=args.clean)
     elif args.command == "push":
         ffpush(args.local_dir, args.s3_url)
+    elif args.command == "deploy":
+        ffdeploy_path(args.local_dir)
     else:
         parser.print_help()
