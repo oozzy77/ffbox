@@ -184,7 +184,6 @@ class Passthrough(Operations):
                 print('🟠 cloud cloud_readdir path', parent_path, 'url', url)
                 json_str = nsclient.get_object(f'{url}/{DIR_META_FILE}')
                 response = json.loads(json_str)
-                print('🟠 cloud getting folder meta.json of', response)
                 for file_name in response:
                     print('filename', file_name, 'parentpath',parent_path)
                     attr = response[file_name]
@@ -329,8 +328,11 @@ class Passthrough(Operations):
         return os.rmdir(full_path)
 
     def mkdir(self, path, mode):
-        print(f'👇making directory {path}')
-        return os.mkdir(self._full_path(path), mode)
+        with self.locks[path]:
+            print(f'👇making directory {path}')
+            ret = os.mkdir(self._full_path(path), mode)
+            self.mark_folder_cached(path)
+            return ret
 
     def statfs(self, path):
         full_path = self._full_path(path)
@@ -346,6 +348,7 @@ class Passthrough(Operations):
         return os.symlink(target, self._full_path(name))
 
     def rename(self, old, new):
+        print(f'👇 renaming {old} to {new}')
         return os.rename(self._full_path(old), self._full_path(new))
 
     def link(self, target, name):
@@ -360,28 +363,32 @@ class Passthrough(Operations):
     def open(self, path, flags):
         print(f'👇opening file {path}')
         fullpath = self._full_path(path)
-        url = os.getxattr(fullpath, 'user.url').decode('utf-8').rstrip('/')
+        try:
+            url = os.getxattr(fullpath, 'user.url').decode('utf-8').rstrip('/')
+        except Exception as e:
+            return os.open(fullpath, flags)
         if url.startswith('/'):
             # Check if any write flags are present
             write_flags = os.O_WRONLY | os.O_RDWR | os.O_APPEND
             if flags & write_flags:
-                print(f'🟠 Opening local file {path} for writing')
-                # copy content from url to fullpath, but keep the metadata of original fullpath file
-                with open(url, 'rb') as src, open(fullpath, 'wb') as dst:
-                    dst.write(src.read())
-                # Mark as cached since we now have the full content
-                self.mark_file_cached(path)
-                # change user.url xattr along fullpath
-                current_path = fullpath
-                while current_path != self.root:
-                    current_path = os.path.dirname(current_path)
-                    print(f'Setting xattr for {current_path} - before: {os.getxattr(current_path, "user.url").decode("utf-8")}')
-                    try:
-                        os.setxattr(current_path, 'user.url', current_path.encode('utf-8'))
-                    except OSError as e:
-                        print(f'Warning: Could not set xattr for {current_path}: {e}')
-                    print(f'Setting xattr for {current_path} - after: {os.getxattr(current_path, "user.url").decode("utf-8")}')
-                return os.open(fullpath, flags)
+                with self.locks[path]:
+                    print(f'🟠 Opening local file {path} for writing')
+                    # copy content from url to fullpath, but keep the metadata of original fullpath file
+                    with open(url, 'rb') as src, open(fullpath, 'wb') as dst:
+                        dst.write(src.read())
+                    # Mark as cached since we now have the full content
+                    self.mark_file_cached(path)
+                    # change user.url xattr along fullpath
+                    current_path = fullpath
+                    while current_path != self.root:
+                        current_path = os.path.dirname(current_path)
+                        print(f'Setting xattr for {current_path} - before: {os.getxattr(current_path, "user.url").decode("utf-8")}')
+                        try:
+                            os.setxattr(current_path, 'user.url', current_path.encode('utf-8'))
+                        except OSError as e:
+                            print(f'Warning: Could not set xattr for {current_path}: {e}')
+                        print(f'Setting xattr for {current_path} - after: {os.getxattr(current_path, "user.url").decode("utf-8")}')
+                    return os.open(fullpath, flags)
             else:
                 print(f'🟢 Opening local file {path} for reading')
                 return os.open(url, flags)
