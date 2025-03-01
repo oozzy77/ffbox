@@ -171,12 +171,14 @@ class Passthrough(Operations):
         parent_path = os.path.dirname(path)
         print(f'checking parent: {parent_path}')
         if self.is_folder_cached(parent_path):
+            print(f'🟠 parent folder {parent_path} is cached so {path} not exists')
             raise FuseOSError(errno.ENOENT)
-        print(f'🟠 cloud getting attributes of {path}', f'parent: {parent_path}')
-        self.cloud_readdir(parent_path)
+        with self.locks[path]:
+            self.cloud_readdir(parent_path)
 
 
     def cloud_readdir(self, parent_path: str):
+        print('🟠 cloud cloud_readdir', parent_path)
         parent_path = parent_path.lstrip('/')
         if self.is_ffbox_folder:
             try:
@@ -294,12 +296,11 @@ class Passthrough(Operations):
         print(f'👇getting attribute of {path}')
         full_path = self._full_path(path)
 
-        with self.locks[path]:
-            if not os.path.exists(full_path):
-                self.cloud_getattr(path)
-            st = os.lstat(full_path)
-            return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
-                        'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+        if not os.path.exists(full_path):
+            self.cloud_getattr(path)
+        st = os.lstat(full_path)
+        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
+                    'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
     def readdir(self, path, fh):
         print(f'👇reading directory {path}')
@@ -308,7 +309,6 @@ class Passthrough(Operations):
                 self.cloud_readdir(path)
         yield '.'
         yield '..'
-        # Add more entries as needed
         for entry in os.listdir(self._full_path(path)):
             yield entry
     def readlink(self, path):
@@ -328,11 +328,10 @@ class Passthrough(Operations):
         return os.rmdir(full_path)
 
     def mkdir(self, path, mode):
-        with self.locks[path]:
-            print(f'👇making directory {path}')
-            ret = os.mkdir(self._full_path(path), mode)
-            self.mark_folder_cached(path)
-            return ret
+        print(f'👇making directory {path}')
+        ret = os.mkdir(self._full_path(path), mode)
+        self.mark_folder_cached(path)
+        return ret
 
     def statfs(self, path):
         full_path = self._full_path(path)
@@ -348,7 +347,6 @@ class Passthrough(Operations):
         return os.symlink(target, self._full_path(name))
 
     def rename(self, old, new):
-        print(f'👇 renaming {old} to {new}')
         return os.rename(self._full_path(old), self._full_path(new))
 
     def link(self, target, name):
@@ -455,16 +453,12 @@ class Passthrough(Operations):
             return os.read(fh, length)
 
     def create(self, path, mode, fi=None):
-        print('👇 creating file')
-        with self.locks[path]:
-            uid, gid, pid = fuse_get_context()
-            full_path = self._full_path(path)
-            fd = os.open(full_path, os.O_WRONLY | os.O_CREAT, mode)
-            os.chown(full_path,uid,gid) #chown to context uid & gid
-            return fd
+        print('👇 create', path)
+        full_path = self._full_path(path)
+        return os.open(full_path, os.O_WRONLY | os.O_CREAT, mode)
 
     def write(self, path, buf, offset, fh):
-        print('👇 writing file')
+        print('👇 writing file', path, offset)
         with self.locks[path]:
             os.lseek(fh, offset, os.SEEK_SET)
             return os.write(fh, buf)
@@ -488,8 +482,7 @@ class Passthrough(Operations):
 
     def fsync(self, path, fdatasync, fh):
         print('👇 fsyncing file')
-        with self.locks[path]:
-            return self.flush(path, fh)
+        return self.flush(path, fh)
 
 
 def check_upload_complete(local_dir, s3_url):
