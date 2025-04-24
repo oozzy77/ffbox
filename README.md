@@ -2,6 +2,8 @@
 
 Work in progress.
 
+一种新式的**可以流式传输，边下载边运行，文件树级别可复用的分布式存储的镜像格式**
+
 **A better docker for deploying LLM or large AI model apps.** With our container fast streaming technology, you get instant inference, quick cold start time for your deployed LLM app.
 
 Deploy your python AI app to cloud by just pushing your code to s3, and run it with a single command.
